@@ -1,16 +1,9 @@
 """
-Polymarket Smart Money Tracker v3.2
+Polymarket Smart Money Tracker v3.3
 ─────────────────────────────────────────────────────────────────
-Fixes respecto a v3.1:
-  - Modelo Claude corregido → claude-sonnet-4-5
-  - ROI corregido → pnl / (volume - pnl) * 100
-  - Anti-spam → misma wallet + mercado en <30min se ignora
-  - Retry en Polymarket API → 3 intentos con backoff
-  - guardar_estado() cada 10 ciclos, no en cada ciclo
-  - whale_streaks limitado a 500 entradas en memoria
-  - Filtro side eliminado → detecta BUY y SELL (posiciones SHORT)
-  - Score de confianza (0-100) visible en mensajes VIP
-  - Alerta mercado caliente → 3+ ballenas en <10min
+Fix principal respecto a v3.2:
+  - verificar_wallet usa /positions en vez de /profiles (que no existe)
+  - ROI calculado desde cashPnl / initialValue de posiciones reales
 """
 
 import os
@@ -126,7 +119,7 @@ def registrar_mercado_caliente(slug: str) -> bool:
     return len(mercado_hits[slug]) >= MERCADO_CALIENTE_N
 
 # ════════════════════════════════════════════════════════════════
-#  VERIFICACIÓN DE WALLET
+#  HTTP CON RETRY
 # ════════════════════════════════════════════════════════════════
 
 def _get_with_retry(url: str, retries: int = 3, timeout: int = 6):
@@ -146,10 +139,19 @@ def _get_with_retry(url: str, retries: int = 3, timeout: int = 6):
         time.sleep(1)
     return None
 
+# ════════════════════════════════════════════════════════════════
+#  VERIFICACIÓN DE WALLET — usa /positions (fix v3.3)
+# ════════════════════════════════════════════════════════════════
+
 def verificar_wallet(wallet: str):
+    """
+    Retorna (roi, perfil_str) o (None, None).
+    Usa /positions para calcular ROI real desde cashPnl / initialValue.
+    """
     wallet = wallet.lower()
     ahora  = datetime.now(timezone.utc)
 
+    # Cache hit
     if wallet in whale_cache:
         entrada = whale_cache[wallet]
         if ahora - entrada["ts"] < timedelta(hours=CACHE_TTL_HORAS):
@@ -159,7 +161,9 @@ def verificar_wallet(wallet: str):
     print(f"   🕵️  Analizando {wallet[:10]}... ", end="", flush=True)
     time.sleep(WALLET_API_DELAY)
 
-    r = _get_with_retry(f"https://data-api.polymarket.com/profiles/{wallet}")
+    r = _get_with_retry(
+        f"https://data-api.polymarket.com/positions?user={wallet}&limit=500&sizeThreshold=1"
+    )
     if r is None:
         return None, None
 
@@ -170,23 +174,24 @@ def verificar_wallet(wallet: str):
 
     try:
         r.raise_for_status()
-        data = r.json()
+        posiciones = r.json()
 
-        pnl          = float(data.get("pnl", 0))
-        trades_count = int(data.get("tradesCount", 0))
-        volume       = float(data.get("volume", 0))
-
-        if pnl <= 0 or volume == 0 or trades_count < 5:
+        if not posiciones:
             whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
-            print(f"descartada (pnl={pnl:.0f}, trades={trades_count})")
+            print("sin posiciones")
             return None, None
 
-        # ── ROI CORREGIDO ────────────────────────────────────────
-        capital_arriesgado = volume - pnl
-        if capital_arriesgado <= 0:
-            capital_arriesgado = volume
-        roi    = (pnl / capital_arriesgado) * 100
-        perfil = f"ROI {roi:.1f}% | Profit ${pnl:,.0f} | {trades_count} trades"
+        total_invertido = sum(float(p.get("initialValue", 0)) for p in posiciones)
+        total_pnl       = sum(float(p.get("cashPnl", 0)) for p in posiciones)
+        num_posiciones  = len(posiciones)
+
+        if total_invertido <= 0 or num_posiciones < 3:
+            whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
+            print(f"descartada (inv=${total_invertido:.0f}, pos={num_posiciones})")
+            return None, None
+
+        roi    = (total_pnl / total_invertido) * 100
+        perfil = f"ROI {roi:.1f}% | PnL ${total_pnl:,.0f} | {num_posiciones} posiciones"
 
         if roi >= MIN_ROI_BASICO:
             whale_cache[wallet] = {"roi": roi, "perfil": perfil, "ts": ahora}
@@ -238,7 +243,7 @@ def get_apodo(wallet: str) -> str:
 #  NOTICIAS
 # ════════════════════════════════════════════════════════════════
 
-def buscar_noticia(query: str) -> str | None:
+def buscar_noticia(query: str):
     try:
         from duckduckgo_search import DDGS
         with DDGS() as ddgs:
@@ -253,7 +258,7 @@ def buscar_noticia(query: str) -> str | None:
 #  ANÁLISIS IA
 # ════════════════════════════════════════════════════════════════
 
-def analizar_con_claude(payload: dict, noticia: str | None) -> str | None:
+def analizar_con_claude(payload: dict, noticia):
     if not ANTHROPIC_API_KEY:
         return None
     try:
@@ -279,7 +284,7 @@ DATOS:
                 "Content-Type":      "application/json",
             },
             json={
-                "model":      "claude-sonnet-4-5",   # ← CORREGIDO
+                "model":      "claude-sonnet-4-5",
                 "max_tokens": 220,
                 "messages":   [{"role": "user", "content": prompt}],
             },
@@ -315,8 +320,7 @@ def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
         f"<i>⚠️ Canal básico — Actualiza a VIP para análisis completo.</i>"
     )
 
-def mensaje_vip(payload: dict, apodo: str, noticia: str | None,
-                analisis: str | None, racha: int, score: int, caliente: bool) -> str:
+def mensaje_vip(payload: dict, apodo: str, noticia, analisis, racha: int, score: int, caliente: bool) -> str:
     racha_txt    = f"\n🔥 <b>RACHA: {racha} ops en sesión</b>" if racha >= 2 else ""
     caliente_txt = "\n🌡️ <b>MERCADO CALIENTE — múltiples ballenas detectadas</b>" if caliente else ""
     noticia_txt  = f"\n\n📰 <b>Contexto:</b> <i>{noticia}</i>" if noticia else ""
@@ -491,7 +495,7 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.2")
+    print("🚀 Polymarket Smart Money Tracker v3.3")
     print(f"   Básico : >${MIN_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
     print(f"   Cebo   : 1/{CEBO_PROBABILIDAD} señales VIP al básico")
