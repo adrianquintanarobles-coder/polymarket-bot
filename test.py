@@ -27,6 +27,7 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 MIN_USD_BASICO      = 50
 MIN_ROI_BASICO      = 0
 MIN_USD_VIP         = 500
+MAX_USD_BASICO      = 499   # techo canal básico gratis
 MIN_ROI_VIP         = 10
 PRECIO_MIN          = 0.15
 PRECIO_MAX          = 0.85
@@ -977,7 +978,7 @@ def poll():
         # ── BÁSICO ───────────────────────────────────────────────
         if TELEGRAM_CHAT_ID_BASICO:
             es_cebo = False
-            if not es_vip and usd >= MIN_USD_BASICO and roi >= MIN_ROI_BASICO:
+            if not es_vip and usd >= MIN_USD_BASICO and usd <= MAX_USD_BASICO and roi >= MIN_ROI_BASICO:
                 pasa = True
             elif es_vip and random.randint(1, CEBO_PROBABILIDAD) == 1:
                 pasa = True; es_cebo = True
