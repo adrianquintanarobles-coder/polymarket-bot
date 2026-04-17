@@ -1,9 +1,13 @@
 """
-Polymarket Smart Money Tracker v3.3
+Polymarket Smart Money Tracker v3.4
 ─────────────────────────────────────────────────────────────────
-Fix principal respecto a v3.2:
-  - verificar_wallet usa /positions en vez de /profiles (que no existe)
-  - ROI calculado desde cashPnl / initialValue de posiciones reales
+Mejoras respecto a v3.3:
+  - ROI mínimo VIP subido a 25% → solo wallets realmente buenas
+  - Filtro de mercados casi resueltos (>85% o <15%) → solo incertidumbre real
+  - Track record automático → guarda cada señal VIP en signals_log.json
+    con mercado, posición, probabilidad y timestamp para medir aciertos
+  - Resumen diario → cada 24h el bot envía al canal VIP las estadísticas
+    del día (señales enviadas, wallets únicas, mercados más activos)
 """
 
 import os
@@ -22,10 +26,12 @@ TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
-MIN_USD_BASICO  = 50
-MIN_ROI_BASICO  = 0
-MIN_USD_VIP     = 500
-MIN_ROI_VIP     = 10
+MIN_USD_BASICO      = 50
+MIN_ROI_BASICO      = 0
+MIN_USD_VIP         = 500
+MIN_ROI_VIP         = 25      # ← subido de 10% a 25%
+PRECIO_MIN          = 0.15    # ← ignora mercados <15% (casi imposible)
+PRECIO_MAX          = 0.85    # ← ignora mercados >85% (casi resuelto)
 
 # ── PARÁMETROS OPERACIONALES ─────────────────────────────────────
 POLL_INTERVAL        = 5
@@ -34,6 +40,7 @@ CACHE_TTL_HORAS      = 6
 WALLET_API_DELAY     = 0.8
 CEBO_PROBABILIDAD    = 4
 PERSIST_PATH         = Path("state.json")
+SIGNALS_LOG_PATH     = Path("signals_log.json")
 SAVE_EVERY_N_CYCLES  = 10
 ANTI_SPAM_MINUTOS    = 30
 MERCADO_CALIENTE_N   = 3
@@ -47,6 +54,15 @@ whale_apodos    = {}
 anti_spam       = {}
 mercado_hits    = defaultdict(list)
 ciclo_actual    = 0
+ultimo_resumen  = datetime.now(timezone.utc)
+
+# Contadores diarios
+stats_dia = {
+    "señales_vip":    0,
+    "señales_basico": 0,
+    "wallets_vip":    set(),
+    "mercados_vip":   [],
+}
 
 # ── APODOS ÉPICOS ────────────────────────────────────────────────
 APODOS_EPICOS = [
@@ -65,6 +81,80 @@ SLUGS_IGNORADOS = [
     "highest-temperature", "lowest-temperature",
     "will-the-price-of", "crypto-", "bitcoin-price",
 ]
+
+# ════════════════════════════════════════════════════════════════
+#  TRACK RECORD — guarda señales VIP para medir aciertos
+# ════════════════════════════════════════════════════════════════
+
+def guardar_señal(payload: dict, apodo: str, score: int):
+    """Guarda cada señal VIP en signals_log.json para track record."""
+    try:
+        if SIGNALS_LOG_PATH.exists():
+            log = json.loads(SIGNALS_LOG_PATH.read_text())
+        else:
+            log = []
+
+        log.append({
+            "timestamp":   payload["timestamp"],
+            "fecha":       datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            "apodo":       apodo,
+            "wallet":      payload["wallet"][:12],
+            "mercado":     payload["market"],
+            "posicion":    f"{payload['side']} → {payload['outcome']}",
+            "usd":         payload["usd_invested"],
+            "prob":        payload["price"],
+            "roi_wallet":  round(payload["roi"], 1),
+            "score":       score,
+            "url":         payload["url"],
+            "resultado":   "PENDIENTE",  # se actualiza manualmente cuando resuelve
+        })
+
+        # Guardar solo los últimos 500 registros
+        SIGNALS_LOG_PATH.write_text(json.dumps(log[-500:], indent=2))
+    except Exception as e:
+        print(f"   ⚠️  No se pudo guardar señal: {e}")
+
+# ════════════════════════════════════════════════════════════════
+#  RESUMEN DIARIO
+# ════════════════════════════════════════════════════════════════
+
+def enviar_resumen_diario():
+    global stats_dia, ultimo_resumen
+
+    if not TELEGRAM_CHAT_ID_VIP:
+        return
+
+    n_vip     = stats_dia["señales_vip"]
+    n_basico  = stats_dia["señales_basico"]
+    n_wallets = len(stats_dia["wallets_vip"])
+
+    # Top 3 mercados más activos
+    mercados_count = defaultdict(int)
+    for m in stats_dia["mercados_vip"]:
+        mercados_count[m] += 1
+    top_mercados = sorted(mercados_count.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_txt = "\n".join([f"  • {m[:40]} ({n}x)" for m, n in top_mercados]) if top_mercados else "  • Sin datos"
+
+    msg = (
+        f"📊 <b>RESUMEN DIARIO VIP</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🐋 <b>Señales VIP enviadas:</b> {n_vip}\n"
+        f"📡 <b>Señales básico:</b> {n_basico}\n"
+        f"👛 <b>Ballenas únicas:</b> {n_wallets}\n\n"
+        f"🔥 <b>Mercados más activos:</b>\n{top_txt}\n\n"
+        f"<i>Track record completo disponible en signals_log.json</i>"
+    )
+
+    enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+
+    # Reset stats
+    stats_dia = {
+        "señales_vip":    0,
+        "señales_basico": 0,
+        "wallets_vip":    set(),
+        "mercados_vip":   [],
+    }
+    ultimo_resumen = datetime.now(timezone.utc)
 
 # ════════════════════════════════════════════════════════════════
 #  PERSISTENCIA
@@ -140,7 +230,7 @@ def _get_with_retry(url: str, retries: int = 3, timeout: int = 6):
     return None
 
 # ════════════════════════════════════════════════════════════════
-#  VERIFICACIÓN DE WALLET — usa /positions (fix v3.3)
+#  VERIFICACIÓN DE WALLET
 # ════════════════════════════════════════════════════════════════
 
 def verificar_wallet(wallet: str):
@@ -151,7 +241,6 @@ def verificar_wallet(wallet: str):
     wallet = wallet.lower()
     ahora  = datetime.now(timezone.utc)
 
-    # Cache hit
     if wallet in whale_cache:
         entrada = whale_cache[wallet]
         if ahora - entrada["ts"] < timedelta(hours=CACHE_TTL_HORAS):
@@ -216,9 +305,9 @@ def calcular_score(usd: float, roi: float, racha: int, caliente: bool) -> int:
     elif usd >= 2000: score += 30
     elif usd >= 1000: score += 20
     else:             score += 10
-    if roi >= 50:     score += 30
-    elif roi >= 25:   score += 20
-    elif roi >= 10:   score += 10
+    if roi >= 75:     score += 30
+    elif roi >= 50:   score += 25
+    elif roi >= 25:   score += 15
     score += min(racha * 5, 20)
     if caliente:      score += 10
     return min(score, 100)
@@ -245,13 +334,20 @@ def get_apodo(wallet: str) -> str:
 
 def buscar_noticia(query: str):
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         with DDGS() as ddgs:
             resultados = list(ddgs.news(query, max_results=1))
         if resultados:
             return resultados[0].get("title")
-    except Exception as e:
-        print(f"   ⚠️  DuckDuckGo: {e}")
+    except Exception:
+        try:
+            from duckduckgo_search import DDGS
+            with DDGS() as ddgs:
+                resultados = list(ddgs.news(query, max_results=1))
+            if resultados:
+                return resultados[0].get("title")
+        except Exception as e:
+            print(f"   ⚠️  Noticias: {e}")
     return None
 
 # ════════════════════════════════════════════════════════════════
@@ -320,7 +416,8 @@ def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
         f"<i>⚠️ Canal básico — Actualiza a VIP para análisis completo.</i>"
     )
 
-def mensaje_vip(payload: dict, apodo: str, noticia, analisis, racha: int, score: int, caliente: bool) -> str:
+def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
+                racha: int, score: int, caliente: bool) -> str:
     racha_txt    = f"\n🔥 <b>RACHA: {racha} ops en sesión</b>" if racha >= 2 else ""
     caliente_txt = "\n🌡️ <b>MERCADO CALIENTE — múltiples ballenas detectadas</b>" if caliente else ""
     noticia_txt  = f"\n\n📰 <b>Contexto:</b> <i>{noticia}</i>" if noticia else ""
@@ -345,7 +442,7 @@ def mensaje_mercado_caliente(slug: str, titulo: str, n: int) -> str:
     return (
         f"🌡️ <b>MERCADO CALIENTE</b> 🌡️\n\n"
         f"📋 <b>Mercado:</b> {titulo}\n"
-        f"🐋 <b>{n} ballenas han operado en los últimos {MERCADO_CALIENTE_MIN} minutos</b>\n\n"
+        f"🐋 <b>{n} ballenas en los últimos {MERCADO_CALIENTE_MIN} minutos</b>\n\n"
         f"🔗 <a href=\"https://polymarket.com/event/{slug}\">Ver mercado</a>\n\n"
         f"<i>Señal de alta convicción institucional.</i>"
     )
@@ -378,9 +475,13 @@ def enviar_telegram(chat_id: str, texto: str) -> bool:
 # ════════════════════════════════════════════════════════════════
 
 def poll():
-    global ciclo_actual
+    global ciclo_actual, ultimo_resumen
     ciclo_actual += 1
     print(f"\n🔍 Ciclo {ciclo_actual} — {datetime.now().strftime('%H:%M:%S')}")
+
+    # Resumen diario cada 24h
+    if datetime.now(timezone.utc) - ultimo_resumen > timedelta(hours=24):
+        enviar_resumen_diario()
 
     r = _get_with_retry("https://data-api.polymarket.com/trades?limit=100")
     if r is None:
@@ -412,11 +513,11 @@ def poll():
         wallet = trade.get("proxyWallet", "")
         slug   = trade.get("eventSlug", "")
 
-        if usd < MIN_USD_BASICO:          continue
-        if es_mercado_basura(trade):      continue
-        if not (0.01 <= precio <= 0.99):  continue
-        if not wallet:                    continue
-
+        # ── Filtros rápidos ──────────────────────────────────────
+        if usd < MIN_USD_BASICO:                    continue
+        if es_mercado_basura(trade):                continue
+        if not (PRECIO_MIN <= precio <= PRECIO_MAX): continue  # ← nuevo filtro precio
+        if not wallet:                              continue
         if es_spam(wallet, slug):
             print(f"   🔇 Spam: {wallet[:10]} en {slug[:20]}")
             continue
@@ -463,6 +564,10 @@ def poll():
             if enviar_telegram(TELEGRAM_CHAT_ID_VIP, mensaje_vip(payload, apodo, noticia, analisis, racha, score, caliente)):
                 print(f"   👑 VIP enviado: {apodo} | ${usd}")
                 señales_vip += 1
+                guardar_señal(payload, apodo, score)
+                stats_dia["señales_vip"] += 1
+                stats_dia["wallets_vip"].add(wallet)
+                stats_dia["mercados_vip"].append(payload["market"])
 
             if caliente and TELEGRAM_CHAT_ID_BASICO:
                 n_hits = len(mercado_hits.get(slug, []))
@@ -482,6 +587,7 @@ def poll():
                 if enviar_telegram(TELEGRAM_CHAT_ID_BASICO, mensaje_basico(payload, es_cebo)):
                     print(f"   {'🎣 Cebo' if es_cebo else '📡 Básico'} enviado: ${usd}")
                     señales_basico += 1
+                    stats_dia["señales_basico"] += 1
 
         time.sleep(0.5)
 
@@ -495,12 +601,14 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.3")
+    print("🚀 Polymarket Smart Money Tracker v3.4")
     print(f"   Básico : >${MIN_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
+    print(f"   Precio : entre {int(PRECIO_MIN*100)}% y {int(PRECIO_MAX*100)}% (sin mercados resueltos)")
     print(f"   Cebo   : 1/{CEBO_PROBABILIDAD} señales VIP al básico")
     print(f"   Anti-spam: {ANTI_SPAM_MINUTOS}min | Cache TTL: {CACHE_TTL_HORAS}h")
     print(f"   Mercado caliente: {MERCADO_CALIENTE_N}+ ballenas en {MERCADO_CALIENTE_MIN}min")
+    print(f"   Track record: {SIGNALS_LOG_PATH}")
     print("─" * 50)
 
     cargar_estado()
