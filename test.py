@@ -1031,5 +1031,5 @@ if __name__ == "__main__":
             guardar_estado()
             break
         except Exception as e:
-            print(f"❌ Error inesperado: {e}")
+            print(f"❌ Erroor inesperado: {e}")
             time.sleep(10)
