@@ -410,7 +410,7 @@ Aquí recibirás alertas en tiempo real de traders rentables operando en Polymar
 • Wallet y mercado verificados
 • Señales en tiempo real
 
-🐋 <b>Canal VIP ($15-20/mes):</b>
+🐋 <b>Canal VIP ($15/mes):</b>
 • Ballenas gordas +$500
 • Score de confianza 0-100
 • Precio entrada vs precio actual
@@ -419,13 +419,14 @@ Aquí recibirás alertas en tiempo real de traders rentables operando en Polymar
 • Track record con tasa de acierto
 • Resumen semanal automático
 
-👉 Escribe /resultados para ver el historial de señales."""
+👇 <b>Acceso inmediato al pagar:</b>
+<a href="t.me/send?start=s-VIPaccess">🔐 Unirse al VIP — $15/mes</a>"""
 
 MENSAJE_PIN_VIP = """🐋 <b>¿Quieres las ballenas gordas?</b>
 
 Este canal es GRATIS y muestra señales de $50–$500.
 
-En el canal <b>VIP ($15-20/mes)</b> recibes:
+En el canal <b>VIP ($15/mes)</b> recibes:
 ✅ Ballenas de +$500 USD
 ✅ Score de confianza 0–100
 ✅ Precio de entrada vs precio actual
@@ -436,7 +437,8 @@ En el canal <b>VIP ($15-20/mes)</b> recibes:
 
 <b>Los traders que seguimos tienen ROI >10% verificado.</b>
 
-📩 Contacta con el admin para acceder al VIP."""
+👇 <b>Acceso inmediato al pagar:</b>
+<a href="t.me/send?start=s-VIPaccess">🔐 Unirse al VIP — $15/mes</a>"""
 
 def fijar_mensaje_vip():
     """Fija el mensaje de promoción VIP arriba del canal básico. Solo una vez al día."""
