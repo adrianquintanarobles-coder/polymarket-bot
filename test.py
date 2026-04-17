@@ -1,11 +1,11 @@
 """
-Polymarket Smart Money Tracker v3.5
+Polymarket Smart Money Tracker v3.6
 ─────────────────────────────────────────────────────────────────
-Mejoras respecto a v3.4:
-  - Comando /resultados → el bot responde con track record reciente
-  - Resumen semanal automático cada lunes a las 9:00 UTC
-  - Bot escucha mensajes entrantes (polling de Telegram updates)
-  - signals_log.json descargable desde Railway Files
+Mejoras respecto a v3.5:
+  - Resolución automática de resultados → el bot consulta cada hora
+    si los mercados pendientes ya resolvieron y marca ACIERTO/FALLO
+  - conditionId guardado en cada señal para poder consultarlo
+  - outcomeIndex guardado para saber qué lado apostó la ballena
 """
 
 import os
@@ -26,8 +26,9 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO      = 50
 MIN_ROI_BASICO      = 0
+MAX_USD_BASICO      = 499 
 MIN_USD_VIP         = 500
-MIN_ROI_VIP         = 25
+MIN_ROI_VIP         = 10
 PRECIO_MIN          = 0.15
 PRECIO_MAX          = 0.85
 
@@ -35,7 +36,7 @@ PRECIO_MAX          = 0.85
 POLL_INTERVAL        = 5
 MAX_SEEN             = 3000
 CACHE_TTL_HORAS      = 6
-WALLET_API_DELAY     = 0.8
+WALLET_API_DELAY     = 0.3   # reducido de 0.8 → más rápido
 CEBO_PROBABILIDAD    = 4
 PERSIST_PATH         = Path("state.json")
 SIGNALS_LOG_PATH     = Path("signals_log.json")
@@ -43,19 +44,20 @@ SAVE_EVERY_N_CYCLES  = 10
 ANTI_SPAM_MINUTOS    = 30
 MERCADO_CALIENTE_N   = 3
 MERCADO_CALIENTE_MIN = 10
+RESOLVER_CADA_HORAS  = 1    # cada cuántas horas revisar resultados pendientes
 
 # ── ESTADO EN MEMORIA ────────────────────────────────────────────
-seen_hashes       = deque(maxlen=MAX_SEEN)
-whale_cache       = {}
-whale_streaks     = {}
-whale_apodos      = {}
-anti_spam         = {}
-mercado_hits      = defaultdict(list)
-ciclo_actual      = 0
-ultimo_resumen    = datetime.now(timezone.utc)
-ultimo_update_id  = 0   # para polling de comandos Telegram
+seen_hashes          = deque(maxlen=MAX_SEEN)
+whale_cache          = {}
+whale_streaks        = {}
+whale_apodos         = {}
+anti_spam            = {}
+mercado_hits         = defaultdict(list)
+ciclo_actual         = 0
+ultimo_resumen       = datetime.now(timezone.utc)
+ultima_resolucion    = datetime.now(timezone.utc) - timedelta(hours=2)
+ultimo_update_id     = 0
 
-# Contadores diarios
 stats_dia = {
     "señales_vip":    0,
     "señales_basico": 0,
@@ -82,7 +84,7 @@ SLUGS_IGNORADOS = [
 ]
 
 # ════════════════════════════════════════════════════════════════
-#  SIGNALS LOG — track record
+#  SIGNALS LOG
 # ════════════════════════════════════════════════════════════════
 
 def cargar_signals() -> list:
@@ -93,26 +95,141 @@ def cargar_signals() -> list:
     except Exception:
         return []
 
-def guardar_señal(payload: dict, apodo: str, score: int):
+def guardar_signals(log: list):
+    try:
+        SIGNALS_LOG_PATH.write_text(json.dumps(log[-500:], indent=2))
+    except Exception as e:
+        print(f"   ⚠️  No se pudo guardar signals: {e}")
+
+def guardar_señal(payload: dict, apodo: str, score: int, trade: dict):
+    """Guarda señal VIP con conditionId y outcomeIndex para resolución automática."""
     try:
         log = cargar_signals()
         log.append({
-            "timestamp":  payload["timestamp"],
-            "fecha":      datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-            "apodo":      apodo,
-            "wallet":     payload["wallet"][:12],
-            "mercado":    payload["market"],
-            "posicion":   f"{payload['side']} → {payload['outcome']}",
-            "usd":        payload["usd_invested"],
-            "prob":       payload["price"],
-            "roi_wallet": round(payload["roi"], 1),
-            "score":      score,
-            "url":        payload["url"],
-            "resultado":  "PENDIENTE",
+            "timestamp":    payload["timestamp"],
+            "fecha":        datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            "apodo":        apodo,
+            "wallet":       payload["wallet"][:12],
+            "mercado":      payload["market"],
+            "posicion":     f"{payload['side']} → {payload['outcome']}",
+            "outcome":      payload["outcome"],
+            "outcomeIndex": int(trade.get("outcomeIndex", -1)),
+            "conditionId":  trade.get("conditionId", ""),
+            "usd":          payload["usd_invested"],
+            "prob":         payload["price"],
+            "roi_wallet":   round(payload["roi"], 1),
+            "score":        score,
+            "url":          payload["url"],
+            "resultado":    "PENDIENTE",
         })
-        SIGNALS_LOG_PATH.write_text(json.dumps(log[-500:], indent=2))
+        guardar_signals(log)
     except Exception as e:
         print(f"   ⚠️  No se pudo guardar señal: {e}")
+
+# ════════════════════════════════════════════════════════════════
+#  RESOLUCIÓN AUTOMÁTICA DE RESULTADOS
+# ════════════════════════════════════════════════════════════════
+
+def resolver_pendientes():
+    """
+    Consulta la API de Polymarket para cada señal PENDIENTE.
+    Si el mercado resolvió, marca ACIERTO o FALLO automáticamente
+    y notifica al canal VIP.
+    """
+    global ultima_resolucion
+
+    ahora = datetime.now(timezone.utc)
+    if ahora - ultima_resolucion < timedelta(hours=RESOLVER_CADA_HORAS):
+        return
+
+    ultima_resolucion = ahora
+    log = cargar_signals()
+    pendientes = [s for s in log if s.get("resultado") == "PENDIENTE" and s.get("conditionId")]
+
+    if not pendientes:
+        return
+
+    print(f"   🔍 Revisando {len(pendientes)} señales pendientes...")
+    actualizadas = 0
+
+    for señal in pendientes:
+        condition_id = señal.get("conditionId", "")
+        outcome_index = señal.get("outcomeIndex", -1)
+
+        if not condition_id or outcome_index == -1:
+            continue
+
+        try:
+            # Consultamos el mercado en la Gamma API de Polymarket
+            r = requests.get(
+                f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}",
+                timeout=8
+            )
+            if not r.ok:
+                continue
+
+            mercados = r.json()
+            if not mercados:
+                continue
+
+            mercado = mercados[0] if isinstance(mercados, list) else mercados
+
+            # Si el mercado no ha resuelto todavía, skip
+            if not mercado.get("closed", False) and not mercado.get("resolved", False):
+                continue
+
+            # Precios finales → string tipo "[1.0, 0.0]" o "[0.0, 1.0]"
+            outcome_prices_raw = mercado.get("outcomePrices", "[]")
+            try:
+                if isinstance(outcome_prices_raw, str):
+                    outcome_prices = json.loads(outcome_prices_raw)
+                else:
+                    outcome_prices = outcome_prices_raw
+            except Exception:
+                continue
+
+            if outcome_index >= len(outcome_prices):
+                continue
+
+            precio_final = float(outcome_prices[outcome_index])
+
+            # Si el precio final es >= 0.9 → el outcome que apostó la ballena ganó
+            if precio_final >= 0.9:
+                señal["resultado"] = "ACIERTO"
+                emoji = "✅"
+            elif precio_final <= 0.1:
+                señal["resultado"] = "FALLO"
+                emoji = "❌"
+            else:
+                # Precio intermedio → mercado resuelto de forma ambigua, skip
+                continue
+
+            actualizadas += 1
+            print(f"   {emoji} Resuelto: {señal['apodo']} → {señal['resultado']}")
+
+            # Notificar al canal VIP
+            if TELEGRAM_CHAT_ID_VIP:
+                msg = (
+                    f"{emoji} <b>RESULTADO CONFIRMADO</b>\n\n"
+                    f"🏷️ <b>Apodo:</b> {señal['apodo']}\n"
+                    f"📋 <b>Mercado:</b> {señal['mercado']}\n"
+                    f"🎯 <b>Posición:</b> {señal['posicion']}\n"
+                    f"💰 <b>Invertido:</b> ${señal['usd']:,.2f} USD\n"
+                    f"📊 <b>Prob. entrada:</b> {señal['prob']}%\n"
+                    f"🎯 <b>Score:</b> {señal['score']}/100\n\n"
+                    f"🔗 <a href=\"{señal['url']}\">Ver mercado</a>"
+                )
+                enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"   ⚠️  Error resolviendo {condition_id[:10]}: {e}")
+            continue
+
+    if actualizadas > 0:
+        guardar_signals(log)
+        print(f"   ✅ {actualizadas} señales resueltas automáticamente")
 
 # ════════════════════════════════════════════════════════════════
 #  COMANDO /resultados
@@ -128,26 +245,25 @@ def generar_texto_resultados() -> str:
     acertadas  = sum(1 for s in log if s["resultado"] == "ACIERTO")
     falladas   = sum(1 for s in log if s["resultado"] == "FALLO")
     resueltas  = acertadas + falladas
-    tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos"
+    tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aún"
 
-    # Últimas 5 señales
     ultimas = log[-5:][::-1]
     ultimas_txt = ""
     for s in ultimas:
         emoji = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
-        ultimas_txt += f"\n{emoji} <b>{s['apodo']}</b> — {s['mercado'][:35]}...\n"
-        ultimas_txt += f"   {s['posicion']} | {s['prob']}% | Score {s['score']}\n"
+        ultimas_txt += f"\n{emoji} <b>{s['apodo']}</b>\n"
+        ultimas_txt += f"   {s['mercado'][:40]}\n"
+        ultimas_txt += f"   {s['posicion']} | Score {s['score']}\n"
 
     return (
-        f"📈 <b>TRACK RECORD COMPLETO</b>\n"
+        f"📈 <b>TRACK RECORD</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"📊 <b>Total señales:</b> {total}\n"
         f"✅ <b>Acertadas:</b> {acertadas}\n"
         f"❌ <b>Falladas:</b> {falladas}\n"
         f"⏳ <b>Pendientes:</b> {pendientes}\n"
         f"🎯 <b>Tasa de acierto:</b> {tasa}\n\n"
-        f"<b>Últimas señales:</b>\n{ultimas_txt}\n"
-        f"<i>Para marcar resultados edita signals_log.json en Railway.</i>"
+        f"<b>Últimas señales:</b>\n{ultimas_txt}"
     )
 
 # ════════════════════════════════════════════════════════════════
@@ -159,25 +275,19 @@ ultimo_lunes_enviado = None
 def check_resumen_semanal():
     global ultimo_lunes_enviado
     ahora = datetime.now(timezone.utc)
-
-    # Solo lunes (weekday=0) a partir de las 9:00 UTC
     if ahora.weekday() != 0 or ahora.hour < 9:
         return
-    # Solo una vez por semana
     semana_actual = ahora.isocalendar()[1]
     if ultimo_lunes_enviado == semana_actual:
         return
-
     ultimo_lunes_enviado = semana_actual
 
     log = cargar_signals()
     if not log:
         return
 
-    # Señales de los últimos 7 días
     hace_7_dias = ahora - timedelta(days=7)
     semana = [s for s in log if datetime.strptime(s["fecha"], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= hace_7_dias]
-
     if not semana:
         return
 
@@ -188,7 +298,6 @@ def check_resumen_semanal():
     resueltas  = acertadas + falladas
     tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "En curso"
 
-    # Top señales por score
     top = sorted(semana, key=lambda x: x["score"], reverse=True)[:3]
     top_txt = ""
     for s in top:
@@ -203,8 +312,7 @@ def check_resumen_semanal():
         f"❌ <b>Falladas:</b> {falladas}\n"
         f"⏳ <b>Pendientes:</b> {pendientes}\n"
         f"🎯 <b>Tasa de acierto:</b> {tasa}\n\n"
-        f"🏆 <b>Top señales:</b>{top_txt}\n"
-        f"<i>Sigue el canal para no perderte ninguna señal.</i>"
+        f"🏆 <b>Top señales:</b>{top_txt}"
     )
 
     if TELEGRAM_CHAT_ID_VIP:
@@ -255,7 +363,6 @@ def check_resumen_diario():
 # ════════════════════════════════════════════════════════════════
 
 def procesar_comandos():
-    """Escucha mensajes entrantes y responde a /resultados."""
     global ultimo_update_id
     if not TELEGRAM_BOT_TOKEN:
         return
@@ -270,33 +377,20 @@ def procesar_comandos():
         updates = r.json().get("result", [])
         for update in updates:
             ultimo_update_id = update["update_id"]
-            msg = update.get("message", {})
-            texto = msg.get("text", "").strip().lower()
+            msg    = update.get("message", {})
+            texto  = msg.get("text", "").strip().lower()
             chat_id = str(msg.get("chat", {}).get("id", ""))
 
-            # Solo responde desde los canales autorizados
-            canales_autorizados = {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO}
-            if chat_id not in canales_autorizados:
+            canales = {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO}
+            if chat_id not in canales:
                 continue
 
-            if texto in ["/resultados", "/resultados@" + _get_bot_username()]:
-                print(f"   📩 Comando /resultados recibido en {chat_id}")
+            if "/resultados" in texto:
+                print(f"   📩 /resultados desde {chat_id}")
                 enviar_telegram(chat_id, generar_texto_resultados())
 
     except Exception as e:
         print(f"   ⚠️  Comandos: {e}")
-
-_bot_username_cache = None
-def _get_bot_username() -> str:
-    global _bot_username_cache
-    if _bot_username_cache:
-        return _bot_username_cache
-    try:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=5)
-        _bot_username_cache = r.json()["result"]["username"]
-    except Exception:
-        _bot_username_cache = "bot"
-    return _bot_username_cache
 
 # ════════════════════════════════════════════════════════════════
 #  PERSISTENCIA
@@ -554,20 +648,56 @@ def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
         f"<i>⚠️ Canal básico — Actualiza a VIP para análisis completo.</i>"
     )
 
+def get_precio_actual(condition_id: str, outcome_index: int) -> float | None:
+    """Consulta el precio actual del mercado en tiempo real."""
+    if not condition_id:
+        return None
+    try:
+        r = requests.get(
+            f"https://gamma-api.polymarket.com/markets?conditionId={condition_id}",
+            timeout=5
+        )
+        if not r.ok:
+            return None
+        mercados = r.json()
+        if not mercados:
+            return None
+        mercado = mercados[0] if isinstance(mercados, list) else mercados
+        prices_raw = mercado.get("outcomePrices", "[]")
+        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+        if outcome_index < len(prices):
+            return round(float(prices[outcome_index]) * 100, 1)
+    except Exception:
+        pass
+    return None
+
 def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
-                racha: int, score: int, caliente: bool) -> str:
+                racha: int, score: int, caliente: bool,
+                precio_actual: float | None = None) -> str:
     racha_txt    = f"\n🔥 <b>RACHA: {racha} ops en sesión</b>" if racha >= 2 else ""
     caliente_txt = "\n🌡️ <b>MERCADO CALIENTE — múltiples ballenas detectadas</b>" if caliente else ""
     noticia_txt  = f"\n\n📰 <b>Contexto:</b> <i>{noticia}</i>" if noticia else ""
     analisis_txt = f"\n\n🤖 <b>Análisis IA:</b>\n{analisis}" if analisis else ""
+
+    # Comparativa de precio entrada vs precio actual
+    if precio_actual and precio_actual != payload['price']:
+        diff = precio_actual - payload['price']
+        flecha = "📈" if diff > 0 else "📉"
+        precio_txt = (
+            f"\n📊 <b>Precio entrada ballena:</b> {payload['price']}%"
+            f"\n{flecha} <b>Precio actual ahora:</b> {precio_actual}% "
+            f"({'+'if diff>0 else ''}{diff:.1f}%)"
+        )
+    else:
+        precio_txt = f"\n📊 <b>Probabilidad:</b> {payload['price']}%"
 
     return (
         f"🐋 <b>ALERTA VIP — BALLENA VERIFICADA</b> 🐋{racha_txt}{caliente_txt}\n\n"
         f"🏷️ <b>Apodo:</b> {apodo}\n"
         f"📋 <b>Mercado:</b> {payload['market']}\n"
         f"🎯 <b>Posición:</b> {payload['side']} → <b>{payload['outcome']}</b>\n"
-        f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD\n"
-        f"📊 <b>Probabilidad:</b> {payload['price']}%\n"
+        f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD"
+        f"{precio_txt}\n"
         f"📈 <b>Perfil:</b> {payload['perfil']}\n"
         f"🎯 <b>Score:</b> {score}/100 {score_emoji(score)}\n"
         f"🔑 <b>Wallet:</b> <code>{payload['wallet'][:10]}...</code>"
@@ -617,10 +747,10 @@ def poll():
     ciclo_actual += 1
     print(f"\n🔍 Ciclo {ciclo_actual} — {datetime.now().strftime('%H:%M:%S')}")
 
-    # Tareas periódicas
     procesar_comandos()
     check_resumen_diario()
     check_resumen_semanal()
+    resolver_pendientes()
 
     r = _get_with_retry("https://data-api.polymarket.com/trades?limit=100")
     if r is None:
@@ -696,13 +826,17 @@ def poll():
             score = calcular_score(usd, roi, racha, caliente)
 
             print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd} | Score {score}")
-            noticia  = buscar_noticia(trade.get("title", ""))
-            analisis = analizar_con_claude(payload, noticia)
+            noticia       = buscar_noticia(trade.get("title", ""))
+            analisis      = analizar_con_claude(payload, noticia)
+            precio_actual = get_precio_actual(
+                trade.get("conditionId", ""),
+                int(trade.get("outcomeIndex", -1))
+            )
 
-            if enviar_telegram(TELEGRAM_CHAT_ID_VIP, mensaje_vip(payload, apodo, noticia, analisis, racha, score, caliente)):
+            if enviar_telegram(TELEGRAM_CHAT_ID_VIP, mensaje_vip(payload, apodo, noticia, analisis, racha, score, caliente, precio_actual)):
                 print(f"   👑 VIP enviado: {apodo} | ${usd}")
                 señales_vip += 1
-                guardar_señal(payload, apodo, score)
+                guardar_señal(payload, apodo, score, trade)
                 stats_dia["señales_vip"] += 1
                 stats_dia["wallets_vip"].add(wallet)
                 stats_dia["mercados_vip"].append(payload["market"])
@@ -739,11 +873,12 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.5")
+    print("🚀 Polymarket Smart Money Tracker v3.6")
     print(f"   Básico : >${MIN_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
     print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
     print(f"   Cebo   : 1/{CEBO_PROBABILIDAD} señales VIP al básico")
+    print(f"   Resolución automática cada {RESOLVER_CADA_HORAS}h")
     print(f"   Comandos: /resultados")
     print(f"   Resúmenes: diario + semanal (lunes 9:00 UTC)")
     print("─" * 50)
