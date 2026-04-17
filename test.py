@@ -1,14 +1,16 @@
 """
-Polymarket Smart Money Tracker v3.1
+Polymarket Smart Money Tracker v3.2
 ─────────────────────────────────────────────────────────────────
-Mejoras respecto a v3.0:
-  - Cache de wallets con TTL (6h) → evita aprobar wallets degradadas
-  - Rate limiting interno → protege contra ban de la API de Polymarket
-  - Lógica de "cebo" recuperada → señales VIP filtradas al básico para conversión
-  - Persistencia ligera en JSON → survive Railway restarts
-  - Cálculo de racha real → solo cuenta ops consecutivas en la misma sesión
-  - Fallback robusto en noticias y Claude → nunca bloquea el flujo
-  - Mensaje básico mejorado → más FOMO, más conversión
+Fixes respecto a v3.1:
+  - Modelo Claude corregido → claude-sonnet-4-5
+  - ROI corregido → pnl / (volume - pnl) * 100
+  - Anti-spam → misma wallet + mercado en <30min se ignora
+  - Retry en Polymarket API → 3 intentos con backoff
+  - guardar_estado() cada 10 ciclos, no en cada ciclo
+  - whale_streaks limitado a 500 entradas en memoria
+  - Filtro side eliminado → detecta BUY y SELL (posiciones SHORT)
+  - Score de confianza (0-100) visible en mensajes VIP
+  - Alerta mercado caliente → 3+ ballenas en <10min
 """
 
 import os
@@ -17,7 +19,7 @@ import time
 import random
 import requests
 from datetime import datetime, timezone, timedelta
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 
 # ── CONFIGURACIÓN (variables de entorno en Railway) ──────────────
@@ -27,24 +29,31 @@ TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
-MIN_USD_BASICO  = 5
+MIN_USD_BASICO  = 50
 MIN_ROI_BASICO  = 0
-MIN_USD_VIP     = 50
-MIN_ROI_VIP     = 5
+MIN_USD_VIP     = 500
+MIN_ROI_VIP     = 10
 
 # ── PARÁMETROS OPERACIONALES ─────────────────────────────────────
-POLL_INTERVAL        = 5          # segundos entre ciclos
-MAX_SEEN             = 3000       # hashes recordados
-CACHE_TTL_HORAS      = 6         # tiempo de vida del cache de wallets
-WALLET_API_DELAY     = 0.8       # segundos entre llamadas al perfil de wallet
-CEBO_PROBABILIDAD    = 4         # 1 de cada N señales VIP se filtra al básico
-PERSIST_PATH         = Path("state.json")   # archivo de persistencia
+POLL_INTERVAL        = 5
+MAX_SEEN             = 3000
+CACHE_TTL_HORAS      = 6
+WALLET_API_DELAY     = 0.8
+CEBO_PROBABILIDAD    = 4
+PERSIST_PATH         = Path("state.json")
+SAVE_EVERY_N_CYCLES  = 10
+ANTI_SPAM_MINUTOS    = 30
+MERCADO_CALIENTE_N   = 3
+MERCADO_CALIENTE_MIN = 10
 
 # ── ESTADO EN MEMORIA ────────────────────────────────────────────
-seen_hashes   = deque(maxlen=MAX_SEEN)
-whale_cache   = {}   # wallet → {"roi": float, "perfil": str, "ts": datetime}
-whale_streaks = {}   # wallet → int (racha en sesión actual)
-whale_apodos  = {}   # wallet → str (apodo asignado, persiste en sesión)
+seen_hashes     = deque(maxlen=MAX_SEEN)
+whale_cache     = {}
+whale_streaks   = {}
+whale_apodos    = {}
+anti_spam       = {}
+mercado_hits    = defaultdict(list)
+ciclo_actual    = 0
 
 # ── APODOS ÉPICOS ────────────────────────────────────────────────
 APODOS_EPICOS = [
@@ -69,7 +78,6 @@ SLUGS_IGNORADOS = [
 # ════════════════════════════════════════════════════════════════
 
 def cargar_estado():
-    """Carga apodos y hashes vistos desde disco al arrancar."""
     global whale_apodos
     if not PERSIST_PATH.exists():
         return
@@ -83,11 +91,10 @@ def cargar_estado():
         print(f"   ⚠️  No se pudo cargar estado: {e}")
 
 def guardar_estado():
-    """Persiste apodos y hashes vistos en disco."""
     try:
         data = {
             "apodos":      whale_apodos,
-            "seen_hashes": list(seen_hashes)[-500:],  # solo los últimos 500
+            "seen_hashes": list(seen_hashes)[-500:],
         }
         PERSIST_PATH.write_text(json.dumps(data, indent=2))
     except Exception as e:
@@ -102,40 +109,66 @@ def es_mercado_basura(trade: dict) -> bool:
     title = trade.get("title", "").lower()
     return any(p in slug or p in title for p in SLUGS_IGNORADOS)
 
+def es_spam(wallet: str, slug: str) -> bool:
+    key   = (wallet.lower(), slug.lower())
+    ahora = datetime.now(timezone.utc)
+    if key in anti_spam:
+        if ahora - anti_spam[key] < timedelta(minutes=ANTI_SPAM_MINUTOS):
+            return True
+    anti_spam[key] = ahora
+    return False
+
+def registrar_mercado_caliente(slug: str) -> bool:
+    ahora  = datetime.now(timezone.utc)
+    limite = ahora - timedelta(minutes=MERCADO_CALIENTE_MIN)
+    mercado_hits[slug] = [t for t in mercado_hits[slug] if t > limite]
+    mercado_hits[slug].append(ahora)
+    return len(mercado_hits[slug]) >= MERCADO_CALIENTE_N
+
 # ════════════════════════════════════════════════════════════════
-#  VERIFICACIÓN DE WALLET (con TTL)
+#  VERIFICACIÓN DE WALLET
 # ════════════════════════════════════════════════════════════════
 
+def _get_with_retry(url: str, retries: int = 3, timeout: int = 6):
+    for intento in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            if r.status_code == 429:
+                wait = 2 ** intento
+                print(f"   ⏳ Rate limit, esperando {wait}s...")
+                time.sleep(wait)
+                continue
+            return r
+        except requests.exceptions.Timeout:
+            print(f"   ⏱️  Timeout (intento {intento+1}/{retries})")
+        except Exception as e:
+            print(f"   ❌ Error red: {e}")
+        time.sleep(1)
+    return None
+
 def verificar_wallet(wallet: str):
-    """
-    Retorna (roi, perfil_str) o (None, None).
-    Usa cache con TTL de CACHE_TTL_HORAS para no re-consultar wallets recientes.
-    """
     wallet = wallet.lower()
     ahora  = datetime.now(timezone.utc)
 
-    # ── Cache hit ────────────────────────────────────────────────
     if wallet in whale_cache:
         entrada = whale_cache[wallet]
-        edad    = ahora - entrada["ts"]
-        if edad < timedelta(hours=CACHE_TTL_HORAS):
+        if ahora - entrada["ts"] < timedelta(hours=CACHE_TTL_HORAS):
             return entrada["roi"], entrada["perfil"]
-        # expirado → borramos y reconsultamos
         del whale_cache[wallet]
 
     print(f"   🕵️  Analizando {wallet[:10]}... ", end="", flush=True)
-    time.sleep(WALLET_API_DELAY)   # rate limiting
+    time.sleep(WALLET_API_DELAY)
+
+    r = _get_with_retry(f"https://data-api.polymarket.com/profiles/{wallet}")
+    if r is None:
+        return None, None
+
+    if r.status_code == 404:
+        whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
+        print("404")
+        return None, None
 
     try:
-        r = requests.get(
-            f"https://data-api.polymarket.com/profiles/{wallet}",
-            timeout=6
-        )
-        if r.status_code == 404:
-            whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
-            print("404")
-            return None, None
-
         r.raise_for_status()
         data = r.json()
 
@@ -148,7 +181,11 @@ def verificar_wallet(wallet: str):
             print(f"descartada (pnl={pnl:.0f}, trades={trades_count})")
             return None, None
 
-        roi    = (pnl / volume) * 100
+        # ── ROI CORREGIDO ────────────────────────────────────────
+        capital_arriesgado = volume - pnl
+        if capital_arriesgado <= 0:
+            capital_arriesgado = volume
+        roi    = (pnl / capital_arriesgado) * 100
         perfil = f"ROI {roi:.1f}% | Profit ${pnl:,.0f} | {trades_count} trades"
 
         if roi >= MIN_ROI_BASICO:
@@ -165,6 +202,29 @@ def verificar_wallet(wallet: str):
         return None, None
 
 # ════════════════════════════════════════════════════════════════
+#  SCORE DE CONFIANZA (0–100)
+# ════════════════════════════════════════════════════════════════
+
+def calcular_score(usd: float, roi: float, racha: int, caliente: bool) -> int:
+    score = 0
+    if usd >= 5000:   score += 40
+    elif usd >= 2000: score += 30
+    elif usd >= 1000: score += 20
+    else:             score += 10
+    if roi >= 50:     score += 30
+    elif roi >= 25:   score += 20
+    elif roi >= 10:   score += 10
+    score += min(racha * 5, 20)
+    if caliente:      score += 10
+    return min(score, 100)
+
+def score_emoji(score: int) -> str:
+    if score >= 80: return "🔥🔥🔥"
+    if score >= 60: return "🔥🔥"
+    if score >= 40: return "🔥"
+    return "⚡"
+
+# ════════════════════════════════════════════════════════════════
 #  APODOS
 # ════════════════════════════════════════════════════════════════
 
@@ -175,7 +235,7 @@ def get_apodo(wallet: str) -> str:
     return whale_apodos[wallet]
 
 # ════════════════════════════════════════════════════════════════
-#  NOTICIAS (DuckDuckGo)
+#  NOTICIAS
 # ════════════════════════════════════════════════════════════════
 
 def buscar_noticia(query: str) -> str | None:
@@ -190,7 +250,7 @@ def buscar_noticia(query: str) -> str | None:
     return None
 
 # ════════════════════════════════════════════════════════════════
-#  ANÁLISIS IA (Claude)
+#  ANÁLISIS IA
 # ════════════════════════════════════════════════════════════════
 
 def analizar_con_claude(payload: dict, noticia: str | None) -> str | None:
@@ -219,7 +279,7 @@ DATOS:
                 "Content-Type":      "application/json",
             },
             json={
-                "model":      "claude-sonnet-4-20250514",
+                "model":      "claude-sonnet-4-5",   # ← CORREGIDO
                 "max_tokens": 220,
                 "messages":   [{"role": "user", "content": prompt}],
             },
@@ -232,22 +292,17 @@ DATOS:
         return None
 
 # ════════════════════════════════════════════════════════════════
-#  CONSTRUCCIÓN DE MENSAJES
+#  MENSAJES
 # ════════════════════════════════════════════════════════════════
 
 def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
-    """
-    Mensaje para el canal gratuito.
-    Si es_cebo=True, es una señal VIP filtrada → incluye aviso de conversión.
-    """
     cebo_txt = ""
     if es_cebo:
         cebo_txt = (
             "\n\n⭐ <b>SEÑAL VIP FILTRADA</b>\n"
-            f"Esta wallet tiene un perfil verificado y opera con sumas mayores.\n"
-            "<i>En VIP recibes análisis completo, apodo del trader, noticias y análisis IA.</i>"
+            "Esta wallet tiene perfil verificado y opera con sumas mayores.\n"
+            "<i>En VIP recibes análisis completo, score de confianza, noticias y análisis IA.</i>"
         )
-
     return (
         f"📡 <b>SEÑAL DETECTADA</b>\n\n"
         f"📋 <b>Mercado:</b> {payload['market']}\n"
@@ -261,52 +316,53 @@ def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
     )
 
 def mensaje_vip(payload: dict, apodo: str, noticia: str | None,
-                analisis: str | None, racha: int) -> str:
-    racha_txt   = f"\n🔥 <b>RACHA: {racha} ops en sesión</b>" if racha >= 2 else ""
-    noticia_txt = f"\n\n📰 <b>Contexto:</b> <i>{noticia}</i>" if noticia else ""
+                analisis: str | None, racha: int, score: int, caliente: bool) -> str:
+    racha_txt    = f"\n🔥 <b>RACHA: {racha} ops en sesión</b>" if racha >= 2 else ""
+    caliente_txt = "\n🌡️ <b>MERCADO CALIENTE — múltiples ballenas detectadas</b>" if caliente else ""
+    noticia_txt  = f"\n\n📰 <b>Contexto:</b> <i>{noticia}</i>" if noticia else ""
     analisis_txt = f"\n\n🤖 <b>Análisis IA:</b>\n{analisis}" if analisis else ""
 
     return (
-        f"🐋 <b>ALERTA VIP — BALLENA VERIFICADA</b> 🐋{racha_txt}\n\n"
+        f"🐋 <b>ALERTA VIP — BALLENA VERIFICADA</b> 🐋{racha_txt}{caliente_txt}\n\n"
         f"🏷️ <b>Apodo:</b> {apodo}\n"
         f"📋 <b>Mercado:</b> {payload['market']}\n"
         f"🎯 <b>Posición:</b> {payload['side']} → <b>{payload['outcome']}</b>\n"
         f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD\n"
         f"📊 <b>Probabilidad:</b> {payload['price']}%\n"
         f"📈 <b>Perfil:</b> {payload['perfil']}\n"
+        f"🎯 <b>Score:</b> {score}/100 {score_emoji(score)}\n"
         f"🔑 <b>Wallet:</b> <code>{payload['wallet'][:10]}...</code>"
         f"{noticia_txt}{analisis_txt}\n\n"
         f"🔗 <a href=\"{payload['url']}\">Ver mercado en Polymarket</a>\n"
         f"⏰ {payload['timestamp']}"
     )
 
+def mensaje_mercado_caliente(slug: str, titulo: str, n: int) -> str:
+    return (
+        f"🌡️ <b>MERCADO CALIENTE</b> 🌡️\n\n"
+        f"📋 <b>Mercado:</b> {titulo}\n"
+        f"🐋 <b>{n} ballenas han operado en los últimos {MERCADO_CALIENTE_MIN} minutos</b>\n\n"
+        f"🔗 <a href=\"https://polymarket.com/event/{slug}\">Ver mercado</a>\n\n"
+        f"<i>Señal de alta convicción institucional.</i>"
+    )
+
 # ════════════════════════════════════════════════════════════════
-#  ENVÍO A TELEGRAM
+#  TELEGRAM
 # ════════════════════════════════════════════════════════════════
 
 def enviar_telegram(chat_id: str, texto: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not chat_id:
-        print("   ❌ Token o chat_id no configurado")
         return False
     try:
         url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         resp = requests.post(
             url,
-            json={
-                "chat_id":                  chat_id,
-                "text":                     texto,
-                "parse_mode":               "HTML",
-                "disable_web_page_preview": False,
-            },
+            json={"chat_id": chat_id, "text": texto,
+                  "parse_mode": "HTML", "disable_web_page_preview": False},
             timeout=10,
         )
         if resp.status_code == 400:
-            # Fallback sin HTML por si hay caracteres problemáticos
-            resp = requests.post(
-                url,
-                json={"chat_id": chat_id, "text": texto},
-                timeout=10,
-            )
+            resp = requests.post(url, json={"chat_id": chat_id, "text": texto}, timeout=10)
         resp.raise_for_status()
         return True
     except Exception as e:
@@ -318,17 +374,20 @@ def enviar_telegram(chat_id: str, texto: str) -> bool:
 # ════════════════════════════════════════════════════════════════
 
 def poll():
-    print(f"\n🔍 Escaneando... {datetime.now().strftime('%H:%M:%S')}")
+    global ciclo_actual
+    ciclo_actual += 1
+    print(f"\n🔍 Ciclo {ciclo_actual} — {datetime.now().strftime('%H:%M:%S')}")
+
+    r = _get_with_retry("https://data-api.polymarket.com/trades?limit=100")
+    if r is None:
+        print("❌ API Polymarket no responde")
+        return
 
     try:
-        r = requests.get(
-            "https://data-api.polymarket.com/trades?limit=100",
-            timeout=10,
-        )
         r.raise_for_status()
         trades = r.json()
     except Exception as e:
-        print(f"❌ Error API Polymarket: {e}")
+        print(f"❌ Error parsing: {e}")
         return
 
     señales_basico = 0
@@ -340,7 +399,6 @@ def poll():
             continue
         seen_hashes.append(tx)
 
-        # ── Cálculo USD real ─────────────────────────────────────
         try:
             usd    = round(float(trade.get("size", 0)) * float(trade.get("price", 0)), 2)
             precio = float(trade.get("price", 0))
@@ -348,100 +406,97 @@ def poll():
             continue
 
         wallet = trade.get("proxyWallet", "")
+        slug   = trade.get("eventSlug", "")
 
-        # ── Filtros rápidos (sin llamadas API) ───────────────────
         if usd < MIN_USD_BASICO:          continue
         if es_mercado_basura(trade):      continue
         if not (0.01 <= precio <= 0.99):  continue
-        if trade.get("side") != "BUY":    continue
         if not wallet:                    continue
 
-        # ── Verificación de wallet ───────────────────────────────
-        roi = 15.0
-        perfil = "Perfil no verificado" 
+        if es_spam(wallet, slug):
+            print(f"   🔇 Spam: {wallet[:10]} en {slug[:20]}")
+            continue
 
-        # ── Payload base ─────────────────────────────────────────
+        roi, perfil = verificar_wallet(wallet)
+        if roi is None:
+            continue
+
         try:
-            ts = datetime.fromtimestamp(
-                int(trade["timestamp"]), timezone.utc
-            ).strftime('%H:%M:%S UTC')
+            ts = datetime.fromtimestamp(int(trade["timestamp"]), timezone.utc).strftime('%H:%M:%S UTC')
         except Exception:
             ts = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
 
         payload = {
             "wallet":       wallet,
-            "side":         trade.get("side", "BUY"),
+            "side":         trade.get("side", ""),
             "outcome":      trade.get("outcome", ""),
             "usd_invested": usd,
             "price":        round(precio * 100, 1),
             "market":       trade.get("title", "Sin título"),
-            "url":          f"https://polymarket.com/event/{trade.get('eventSlug', '')}",
+            "url":          f"https://polymarket.com/event/{slug}",
             "tx_hash":      tx,
             "timestamp":    ts,
             "perfil":       perfil,
             "roi":          roi,
         }
 
-        es_vip = usd >= MIN_USD_VIP and roi >= MIN_ROI_VIP
+        es_vip   = usd >= MIN_USD_VIP and roi >= MIN_ROI_VIP
+        caliente = registrar_mercado_caliente(slug)
 
-        # ────────────────────────────────────────────────────────
-        #  TIER VIP
-        # ────────────────────────────────────────────────────────
+        # ── VIP ──────────────────────────────────────────────────
         if es_vip and TELEGRAM_CHAT_ID_VIP:
             apodo = get_apodo(wallet)
+            if len(whale_streaks) >= 500:
+                del whale_streaks[next(iter(whale_streaks))]
             whale_streaks[wallet] = whale_streaks.get(wallet, 0) + 1
             racha = whale_streaks[wallet]
+            score = calcular_score(usd, roi, racha, caliente)
 
-            print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd}")
-            print(f"   📰 Buscando noticias...")
+            print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd} | Score {score}")
             noticia  = buscar_noticia(trade.get("title", ""))
-            print(f"   🤖 Consultando Claude...")
             analisis = analizar_con_claude(payload, noticia)
 
-            txt_vip = mensaje_vip(payload, apodo, noticia, analisis, racha)
-            if enviar_telegram(TELEGRAM_CHAT_ID_VIP, txt_vip):
+            if enviar_telegram(TELEGRAM_CHAT_ID_VIP, mensaje_vip(payload, apodo, noticia, analisis, racha, score, caliente)):
                 print(f"   👑 VIP enviado: {apodo} | ${usd}")
                 señales_vip += 1
 
-        # ────────────────────────────────────────────────────────
-        #  TIER BÁSICO
-        #  - Siempre si cumple umbral básico y NO es VIP
-        #  - Si es VIP → cebo probabilístico (1 de cada CEBO_PROBABILIDAD)
-        # ────────────────────────────────────────────────────────
+            if caliente and TELEGRAM_CHAT_ID_BASICO:
+                n_hits = len(mercado_hits.get(slug, []))
+                enviar_telegram(TELEGRAM_CHAT_ID_BASICO, mensaje_mercado_caliente(slug, payload["market"], n_hits))
+
+        # ── BÁSICO ───────────────────────────────────────────────
         if TELEGRAM_CHAT_ID_BASICO:
             es_cebo = False
-
             if not es_vip and usd >= MIN_USD_BASICO and roi >= MIN_ROI_BASICO:
-                pasa_al_basico = True
+                pasa = True
             elif es_vip and random.randint(1, CEBO_PROBABILIDAD) == 1:
-                pasa_al_basico = True
-                es_cebo        = True
+                pasa = True; es_cebo = True
             else:
-                pasa_al_basico = False
+                pasa = False
 
-            if pasa_al_basico:
-                txt_basico = mensaje_basico(payload, es_cebo=es_cebo)
-                if enviar_telegram(TELEGRAM_CHAT_ID_BASICO, txt_basico):
-                    tipo = "🎣 Cebo básico" if es_cebo else "📡 Básico"
-                    print(f"   {tipo} enviado: ${usd}")
+            if pasa:
+                if enviar_telegram(TELEGRAM_CHAT_ID_BASICO, mensaje_basico(payload, es_cebo)):
+                    print(f"   {'🎣 Cebo' if es_cebo else '📡 Básico'} enviado: ${usd}")
                     señales_basico += 1
 
         time.sleep(0.5)
 
-    # Guardamos estado al final de cada ciclo
-    guardar_estado()
-    print(f"📊 Trades: {len(trades)} | Básico: {señales_basico} | VIP: {señales_vip} | Cache: {len(whale_cache)} wallets")
+    if ciclo_actual % SAVE_EVERY_N_CYCLES == 0:
+        guardar_estado()
+
+    print(f"📊 Trades: {len(trades)} | Básico: {señales_basico} | VIP: {señales_vip} | Cache: {len(whale_cache)}")
 
 # ════════════════════════════════════════════════════════════════
 #  INICIO
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.1")
+    print("🚀 Polymarket Smart Money Tracker v3.2")
     print(f"   Básico : >${MIN_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
-    print(f"   Cebo   : 1 de cada {CEBO_PROBABILIDAD} señales VIP al básico")
-    print(f"   Cache TTL: {CACHE_TTL_HORAS}h | Intervalo: {POLL_INTERVAL}s")
+    print(f"   Cebo   : 1/{CEBO_PROBABILIDAD} señales VIP al básico")
+    print(f"   Anti-spam: {ANTI_SPAM_MINUTOS}min | Cache TTL: {CACHE_TTL_HORAS}h")
+    print(f"   Mercado caliente: {MERCADO_CALIENTE_N}+ ballenas en {MERCADO_CALIENTE_MIN}min")
     print("─" * 50)
 
     cargar_estado()
@@ -456,4 +511,4 @@ if __name__ == "__main__":
             break
         except Exception as e:
             print(f"❌ Error inesperado: {e}")
-            time.sleep(10)   # espera antes de reintentar
+            time.sleep(10)
