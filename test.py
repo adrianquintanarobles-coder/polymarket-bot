@@ -27,10 +27,10 @@ TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
-MIN_USD_BASICO  = 50
+MIN_USD_BASICO  = 5
 MIN_ROI_BASICO  = 0
-MIN_USD_VIP     = 500
-MIN_ROI_VIP     = 10
+MIN_USD_VIP     = 50
+MIN_ROI_VIP     = 5
 
 # ── PARÁMETROS OPERACIONALES ─────────────────────────────────────
 POLL_INTERVAL        = 5          # segundos entre ciclos
