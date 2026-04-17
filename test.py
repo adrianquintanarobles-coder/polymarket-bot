@@ -26,7 +26,6 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO      = 50
 MIN_ROI_BASICO      = 0
-MAX_USD_BASICO      = 499 
 MIN_USD_VIP         = 500
 MIN_ROI_VIP         = 10
 PRECIO_MIN          = 0.15
@@ -375,6 +374,7 @@ def procesar_comandos():
         if not r.ok:
             return
         updates = r.json().get("result", [])
+        procesar_nuevos_miembros(updates)
         for update in updates:
             ultimo_update_id = update["update_id"]
             msg    = update.get("message", {})
@@ -391,6 +391,133 @@ def procesar_comandos():
 
     except Exception as e:
         print(f"   ⚠️  Comandos: {e}")
+
+# ════════════════════════════════════════════════════════════════
+#  GESTIÓN DEL CANAL
+# ════════════════════════════════════════════════════════════════
+
+mensaje_pinned_id = None
+ultimo_pin        = None
+ultimo_limpieza   = datetime.now(timezone.utc) - timedelta(hours=25)
+
+MENSAJE_BIENVENIDA = """👋 <b>Bienvenido al canal de señales gratuito</b>
+
+Aquí recibirás alertas en tiempo real de traders rentables operando en Polymarket.
+
+📡 <b>Este canal (GRATIS):</b>
+• Trades de $50 a $500
+• Wallet y mercado verificados
+• Señales en tiempo real
+
+🐋 <b>Canal VIP ($15-20/mes):</b>
+• Ballenas gordas +$500
+• Score de confianza 0-100
+• Precio entrada vs precio actual
+• Análisis IA de cada operación
+• Noticias del mercado
+• Track record con tasa de acierto
+• Resumen semanal automático
+
+👉 Escribe /resultados para ver el historial de señales."""
+
+MENSAJE_PIN_VIP = """🐋 <b>¿Quieres las ballenas gordas?</b>
+
+Este canal es GRATIS y muestra señales de $50–$500.
+
+En el canal <b>VIP ($15-20/mes)</b> recibes:
+✅ Ballenas de +$500 USD
+✅ Score de confianza 0–100
+✅ Precio de entrada vs precio actual
+✅ Análisis IA de cada jugada
+✅ Noticias del mercado en tiempo real
+✅ Track record con tasa de acierto verificada
+✅ Resumen semanal automático
+
+<b>Los traders que seguimos tienen ROI >10% verificado.</b>
+
+📩 Contacta con el admin para acceder al VIP."""
+
+def fijar_mensaje_vip():
+    """Fija el mensaje de promoción VIP arriba del canal básico. Solo una vez al día."""
+    global mensaje_pinned_id, ultimo_pin
+    if not TELEGRAM_CHAT_ID_BASICO or not TELEGRAM_BOT_TOKEN:
+        return
+    ahora = datetime.now(timezone.utc)
+    if ultimo_pin and ahora - ultimo_pin < timedelta(hours=24):
+        return
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID_BASICO, "text": MENSAJE_PIN_VIP, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        if not r.ok:
+            return
+        msg_id = r.json()["result"]["message_id"]
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/pinChatMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID_BASICO, "message_id": msg_id, "disable_notification": True},
+            timeout=10,
+        )
+        mensaje_pinned_id = msg_id
+        ultimo_pin        = ahora
+        print("   📌 Mensaje VIP fijado en canal básico")
+    except Exception as e:
+        print(f"   ⚠️  Pin VIP: {e}")
+
+def limpiar_mensajes_antiguos():
+    """Borra mensajes de más de 7 días del canal básico."""
+    global ultimo_limpieza
+    ahora = datetime.now(timezone.utc)
+    if ahora - ultimo_limpieza < timedelta(hours=24):
+        return
+    ultimo_limpieza = ahora
+    if not TELEGRAM_CHAT_ID_BASICO or not TELEGRAM_BOT_TOKEN:
+        return
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+            params={"limit": 100}, timeout=10,
+        )
+        if not r.ok:
+            return
+        updates  = r.json().get("result", [])
+        limite   = ahora - timedelta(days=7)
+        borrados = 0
+        for update in updates:
+            msg = update.get("channel_post", {})
+            if not msg:
+                continue
+            if str(msg.get("chat", {}).get("id", "")) != TELEGRAM_CHAT_ID_BASICO:
+                continue
+            fecha_msg = datetime.fromtimestamp(msg.get("date", 0), timezone.utc)
+            if fecha_msg >= limite:
+                continue
+            msg_id = msg.get("message_id")
+            if not msg_id or msg_id == mensaje_pinned_id:
+                continue
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID_BASICO, "message_id": msg_id},
+                timeout=5,
+            )
+            if resp.ok:
+                borrados += 1
+            time.sleep(0.1)
+        if borrados > 0:
+            print(f"   🗑️  {borrados} mensajes antiguos borrados")
+    except Exception as e:
+        print(f"   ⚠️  Limpieza: {e}")
+
+def procesar_nuevos_miembros(updates: list):
+    """Detecta nuevos miembros y manda bienvenida."""
+    for update in updates:
+        msg     = update.get("message", {})
+        nuevos  = msg.get("new_chat_members", [])
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        if nuevos and chat_id == TELEGRAM_CHAT_ID_BASICO:
+            print("   👋 Nuevo miembro en básico")
+            enviar_telegram(TELEGRAM_CHAT_ID_BASICO, MENSAJE_BIENVENIDA)
 
 # ════════════════════════════════════════════════════════════════
 #  PERSISTENCIA
@@ -751,6 +878,8 @@ def poll():
     check_resumen_diario()
     check_resumen_semanal()
     resolver_pendientes()
+    fijar_mensaje_vip()
+    limpiar_mensajes_antiguos()
 
     r = _get_with_retry("https://data-api.polymarket.com/trades?limit=100")
     if r is None:
