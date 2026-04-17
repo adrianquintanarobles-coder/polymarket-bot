@@ -996,11 +996,12 @@ def poll():
                     print(f"   {'🎣 Cebo' if es_cebo else '📡 Básico'} enviado: ${usd}")
                     señales_basico += 1
                     stats_dia["señales_basico"] += 1
+                    guardar_estado()  # guardar tras cada señal enviada
 
         time.sleep(0.5)
 
-    if ciclo_actual % SAVE_EVERY_N_CYCLES == 0:
-        guardar_estado()
+    # Guardar también al final de cada ciclo por si acaso
+    guardar_estado()
 
     print(f"📊 Trades: {len(trades)} | Básico: {señales_basico} | VIP: {señales_vip} | Cache: {len(whale_cache)}")
 
