@@ -357,9 +357,8 @@ def poll():
         if not wallet:                    continue
 
         # ── Verificación de wallet ───────────────────────────────
-        roi, perfil = verificar_wallet(wallet)
-        if roi is None:
-            continue
+        roi = 15.0
+        perfil = "Perfil no verificado" 
 
         # ── Payload base ─────────────────────────────────────────
         try:
