@@ -446,7 +446,7 @@ def fijar_mensaje_vip():
     if not TELEGRAM_CHAT_ID_BASICO or not TELEGRAM_BOT_TOKEN:
         return
     ahora = datetime.now(timezone.utc)
-    if ultimo_pin and ahora - ultimo_pin < timedelta(hours=24):
+    if ultimo_pin and ahora - ultimo_pin < timedelta(days=7):
         return
     try:
         r = requests.post(
@@ -527,7 +527,7 @@ def procesar_nuevos_miembros(updates: list):
 # ════════════════════════════════════════════════════════════════
 
 def cargar_estado():
-    global whale_apodos
+    global whale_apodos, ultimo_pin
     if not PERSIST_PATH.exists():
         return
     try:
@@ -535,6 +535,9 @@ def cargar_estado():
         whale_apodos.update(data.get("apodos", {}))
         for h in data.get("seen_hashes", []):
             seen_hashes.append(h)
+        # Recuperar último pin para no repinear tras restart
+        if data.get("ultimo_pin"):
+            ultimo_pin = datetime.fromisoformat(data["ultimo_pin"])
         print(f"   💾 Estado cargado: {len(whale_apodos)} apodos | {len(seen_hashes)} hashes")
     except Exception as e:
         print(f"   ⚠️  No se pudo cargar estado: {e}")
@@ -544,6 +547,7 @@ def guardar_estado():
         data = {
             "apodos":      whale_apodos,
             "seen_hashes": list(seen_hashes)[-500:],
+            "ultimo_pin":  ultimo_pin.isoformat() if ultimo_pin else None,
         }
         PERSIST_PATH.write_text(json.dumps(data, indent=2))
     except Exception as e:
