@@ -218,11 +218,13 @@ def get_stats():
     try:
         if not SIGNALS_LOG_PATH.exists():
             return jsonify({
-                "total": 0,
-                "aciertos": 0,
-                "fallos": 0,
-                "pendientes": 0,
+                "total_signals": 0,
+                "success_rate": 0,
+                "total_aciertos": 0,
+                "total_fallos": 0,
+                "total_pendientes": 0,
                 "tasa_acierto": "0%",
+                "total_volume": 0,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
         
@@ -236,12 +238,17 @@ def get_stats():
         resueltas = aciertos + fallos
         tasa = f"{(aciertos/resueltas*100):.0f}%" if resueltas > 0 else "N/A"
         
+        # Calcula total de USD invertido
+        total_volume = sum(s.get("usd", 0) for s in signals)
+        
         return jsonify({
-            "total": total,
-            "aciertos": aciertos,
-            "fallos": fallos,
-            "pendientes": pendientes,
+            "total_signals": total,
+            "success_rate": (aciertos/resueltas) if resueltas > 0 else 0,
+            "total_aciertos": aciertos,
+            "total_fallos": fallos,
+            "total_pendientes": pendientes,
             "tasa_acierto": tasa,
+            "total_volume": total_volume,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
     except Exception as e:
