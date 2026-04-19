@@ -150,7 +150,13 @@ ultimo_limpieza   = datetime.now(timezone.utc) - timedelta(hours=25)
 # ══════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, 
+     origins=["*"],
+     allow_headers=["*"],
+     methods=["GET", "POST", "OPTIONS"],
+     expose_headers=["*"],
+     max_age=3600,
+     supports_credentials=True)
 
 # ── Signals API ────────────────────────────────────────────────────
 
