@@ -287,8 +287,8 @@ def revisar_divergencias():
             precio_entrada = entrada["precio_entrada"]
             diff = precio_actual - precio_entrada
 
-            # Solo alerta si bajó ≥3 puntos porcentuales
-            if diff <= -3:
+            # Solo alerta si bajó ≥15 puntos porcentuales (bajada brutal)
+            if diff <= -15:
                 msg = (
                     f"📉 <b>DIVERGENCIA DETECTADA</b> 📉\n\n"
                     f"🏷️ <b>{entrada['apodo']}</b> compró pero el precio bajó\n\n"
