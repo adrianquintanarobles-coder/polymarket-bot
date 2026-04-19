@@ -28,9 +28,9 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO      = 50
 MIN_ROI_BASICO      = 0
-MIN_USD_VIP         = 100
+MIN_USD_VIP         = 500
 MAX_USD_BASICO      = 499
-MIN_ROI_VIP         = 5
+MIN_ROI_VIP         = 10
 PRECIO_MIN          = 0.15
 PRECIO_MAX          = 0.85
 
@@ -414,31 +414,45 @@ def resolver_pendientes():
             actualizadas += 1
             print(f"   {emoji} Resuelto: {señal['apodo']} → {señal['resultado']}")
 
+            # Calcular tiempo transcurrido desde la señal
+            try:
+                ts_señal = datetime.strptime(señal["timestamp"], '%H:%M:%S UTC').replace(
+                    tzinfo=timezone.utc,
+                    year=datetime.now(timezone.utc).year,
+                    month=datetime.now(timezone.utc).month,
+                    day=datetime.now(timezone.utc).day
+                )
+                diff_seg = (datetime.now(timezone.utc) - ts_señal).seconds
+                if diff_seg >= 3600:
+                    tiempo_txt = f"hace {diff_seg // 3600}h {(diff_seg % 3600) // 60}min"
+                else:
+                    tiempo_txt = f"hace {diff_seg // 60}min"
+            except Exception:
+                tiempo_txt = "hace un momento"
+
             if TELEGRAM_CHAT_ID_VIP:
                 h = get_historial_ballena(señal["apodo"])
-                historial_txt = f"\n📜 Historial actualizado: {h['aciertos']}/{h['total']} ({h['tasa']}) {h['emoji']}" if h["total"] > 0 else ""
-                msg = (
+                historial_txt = f"\n📜 <b>Historial:</b> {h['aciertos']}/{h['total']} aciertos ({h['tasa']}) {h['emoji']}" if h["total"] > 0 else ""
+                msg_vip = (
                     f"{emoji} <b>RESULTADO CONFIRMADO</b>\n\n"
-                    f"🏷️ <b>Apodo:</b> {señal['apodo']}\n"
-                    f"📋 <b>Mercado:</b> {señal['mercado']}\n"
-                    f"🎯 <b>Posición:</b> {señal['posicion']}\n"
-                    f"💰 <b>Invertido:</b> ${señal['usd']:,.2f} USD\n"
-                    f"📊 <b>Prob. entrada:</b> {señal['prob']}%\n"
-                    f"🎯 <b>Score:</b> {señal['score']}/100"
+                    f"🐋 <b>{señal['apodo']}</b> apostó {tiempo_txt}:\n"
+                    f"📋 {señal['mercado']}\n"
+                    f"🎯 {señal['posicion']} — <b>${señal['usd']:,.0f} USD</b> al {señal['prob']}%\n\n"
+                    f"<b>El mercado resolvió → {emoji} {'Acertó' if señal['resultado'] == 'ACIERTO' else 'Falló'}</b>"
                     f"{historial_txt}\n\n"
                     f"🔗 <a href=\"{señal['url']}\">Ver mercado</a>"
                 )
-                enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+                enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg_vip)
 
             # FOMO al canal básico solo si fue ACIERTO
             if señal["resultado"] == "ACIERTO" and TELEGRAM_CHAT_ID_BASICO:
                 msg_fomo = (
                     f"✅ <b>SEÑAL VIP VERIFICADA — ACIERTO</b>\n\n"
-                    f"Una ballena apostó <b>${señal['usd']:,.0f} USD</b> "
-                    f"en <b>{señal['posicion']}</b>\n"
-                    f"📋 {señal['mercado']}\n\n"
-                    f"<b>El mercado resolvió. La ballena acertó.</b>\n\n"
-                    f"<i>Los suscriptores VIP recibieron esta señal en tiempo real.</i>\n\n"
+                    f"{tiempo_txt} detectamos esta jugada:\n"
+                    f"📋 <b>{señal['mercado']}</b>\n"
+                    f"🎯 {señal['posicion']} — ${señal['usd']:,.0f} USD al {señal['prob']}%\n\n"
+                    f"<b>El mercado resolvió. La ballena acertó ✅</b>\n\n"
+                    f"<i>Los suscriptores VIP lo vieron en tiempo real.</i>\n\n"
                     f"👇 ¿La perdiste?\n"
                     f"<a href=\"t.me/send?start=s-VIPaccess\">🔐 Unirse al VIP — $15/mes</a>"
                 )
