@@ -1332,6 +1332,8 @@ def bot_loop():
                                 "mercado": payload["market"],
                                 "usd": payload["usd_invested"],
                                 "prob": payload["price"],
+                                "conditionId": trade.get("conditionId", ""),
+                                "outcomeIndex": int(trade.get("outcomeIndex", -1)),
                                 "resultado": "PENDIENTE",
                                 "tipo": "BASICO"
                             })
