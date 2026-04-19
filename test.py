@@ -590,7 +590,7 @@ def procesar_comandos():
             texto   = msg.get("text", "").strip().lower()
             chat_id = str(msg.get("chat", {}).get("id", ""))
 
-            canales = {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO}
+            canales = {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO, "1387775814"}
             if chat_id not in canales:
                 continue
 
