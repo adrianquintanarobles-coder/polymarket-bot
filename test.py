@@ -1314,6 +1314,7 @@ def bot_loop():
                             print(f"   {'🎣 Cebo' if es_cebo else '📡 Básico'} enviado: ${usd}")
                             señales_basico += 1
                             stats_dia["señales_basico"] += 1
+                            guardar_señal(payload, apodo, score, trade)  
                             guardar_estado()
 
                 time.sleep(0.5)
