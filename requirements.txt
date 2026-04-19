@@ -1,2 +1,4 @@
 requests
 ddgs
+flask==3.0.0
+stripe==7.4.0
