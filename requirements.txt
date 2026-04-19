@@ -3,3 +3,6 @@ ddgs
 flask==3.0.0
 flask-cors==4.0.0
 stripe==7.4.0
+requests
+ddgs
+psycopg2-binary

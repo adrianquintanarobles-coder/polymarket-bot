@@ -15,6 +15,8 @@ import json
 import time
 import random
 import requests
+import psycopg2
+import psycopg2.extras
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 from pathlib import Path
@@ -33,6 +35,45 @@ MAX_USD_BASICO      = 499
 MIN_ROI_VIP         = 10
 PRECIO_MIN          = 0.15
 PRECIO_MAX          = 0.85
+
+# ── BASE DE DATOS ────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
+
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    """Crea la tabla de señales si no existe."""
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id          SERIAL PRIMARY KEY,
+                timestamp   TEXT,
+                fecha       TEXT,
+                apodo       TEXT,
+                wallet      TEXT,
+                mercado     TEXT,
+                posicion    TEXT,
+                outcome     TEXT,
+                outcome_index INTEGER,
+                condition_id  TEXT,
+                usd         FLOAT,
+                prob        FLOAT,
+                roi_wallet  FLOAT,
+                score       INTEGER,
+                url         TEXT,
+                resultado   TEXT DEFAULT 'PENDIENTE',
+                created_at  TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("   🗄️  Base de datos inicializada")
+    except Exception as e:
+        print(f"   ⚠️  DB init error: {e}")
 
 # ── PARÁMETROS OPERACIONALES ─────────────────────────────────────
 POLL_INTERVAL            = 5
@@ -315,40 +356,49 @@ def revisar_divergencias():
 # ════════════════════════════════════════════════════════════════
 
 def cargar_signals() -> list:
-    if not SIGNALS_LOG_PATH.exists():
-        return []
     try:
-        return json.loads(SIGNALS_LOG_PATH.read_text())
-    except Exception:
+        conn = get_db()
+        cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 500")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(r) for r in reversed(rows)]
+    except Exception as e:
+        print(f"   ⚠️  DB cargar error: {e}")
         return []
 
 def guardar_signals(log: list):
-    try:
-        SIGNALS_LOG_PATH.write_text(json.dumps(log[-500:], indent=2))
-    except Exception as e:
-        print(f"   ⚠️  No se pudo guardar signals: {e}")
+    pass  # No usado con DB — se usa guardar_señal_db directamente
 
 def guardar_señal(payload: dict, apodo: str, score: int, trade: dict):
     try:
-        log = cargar_signals()
-        log.append({
-            "timestamp":    payload["timestamp"],
-            "fecha":        datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-            "apodo":        apodo,
-            "wallet":       payload["wallet"][:12],
-            "mercado":      payload["market"],
-            "posicion":     f"{payload['side']} → {payload['outcome']}",
-            "outcome":      payload["outcome"],
-            "outcomeIndex": int(trade.get("outcomeIndex", -1)),
-            "conditionId":  trade.get("conditionId", ""),
-            "usd":          payload["usd_invested"],
-            "prob":         payload["price"],
-            "roi_wallet":   round(payload["roi"], 1),
-            "score":        score,
-            "url":          payload["url"],
-            "resultado":    "PENDIENTE",
-        })
-        guardar_signals(log)
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
+            INSERT INTO signals
+            (timestamp, fecha, apodo, wallet, mercado, posicion, outcome,
+             outcome_index, condition_id, usd, prob, roi_wallet, score, url, resultado)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDIENTE')
+        """, (
+            payload["timestamp"],
+            datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            apodo,
+            payload["wallet"][:12],
+            payload["market"],
+            f"{payload['side']} → {payload['outcome']}",
+            payload["outcome"],
+            int(trade.get("outcomeIndex", -1)),
+            trade.get("conditionId", ""),
+            payload["usd_invested"],
+            payload["price"],
+            round(payload["roi"], 1),
+            score,
+            payload["url"],
+        ))
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
         print(f"   ⚠️  No se pudo guardar señal: {e}")
 
@@ -403,16 +453,32 @@ def resolver_pendientes():
             precio_final = float(outcome_prices[outcome_index])
 
             if precio_final >= 0.9:
-                señal["resultado"] = "ACIERTO"
+                resultado = "ACIERTO"
                 emoji = "✅"
             elif precio_final <= 0.1:
-                señal["resultado"] = "FALLO"
+                resultado = "FALLO"
                 emoji = "❌"
             else:
                 continue
 
+            señal["resultado"] = resultado
+
+            # Actualizar en DB
+            try:
+                conn_u = get_db()
+                cur_u  = conn_u.cursor()
+                cur_u.execute(
+                    "UPDATE signals SET resultado=%s WHERE condition_id=%s AND outcome_index=%s AND resultado='PENDIENTE'",
+                    (resultado, condition_id, outcome_index)
+                )
+                conn_u.commit()
+                cur_u.close()
+                conn_u.close()
+            except Exception as e:
+                print(f"   ⚠️  DB update error: {e}")
+
             actualizadas += 1
-            print(f"   {emoji} Resuelto: {señal['apodo']} → {señal['resultado']}")
+            print(f"   {emoji} Resuelto: {señal['apodo']} → {resultado}")
 
             # Calcular tiempo transcurrido desde la señal
             try:
@@ -466,7 +532,6 @@ def resolver_pendientes():
             continue
 
     if actualizadas > 0:
-        guardar_signals(log)
         print(f"   ✅ {actualizadas} señales resueltas")
 
 # ════════════════════════════════════════════════════════════════
@@ -1237,13 +1302,14 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.9")
+    print("🚀 Polymarket Smart Money Tracker v4.0 — PostgreSQL")
     print(f"   Básico : >${MIN_USD_BASICO}–${MAX_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
     print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
     print(f"   Nuevas : Historial ballenas | Alta convicción | Divergencia")
     print("─" * 50)
 
+    init_db()
     cargar_estado()
 
     while True:
