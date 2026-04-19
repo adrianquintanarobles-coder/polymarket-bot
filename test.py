@@ -28,9 +28,9 @@ ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO      = 50
 MIN_ROI_BASICO      = 0
-MIN_USD_VIP         = 500
+MIN_USD_VIP         = 100
 MAX_USD_BASICO      = 499
-MIN_ROI_VIP         = 10
+MIN_ROI_VIP         = 5
 PRECIO_MIN          = 0.15
 PRECIO_MAX          = 0.85
 
