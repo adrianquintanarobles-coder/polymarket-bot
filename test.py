@@ -1215,9 +1215,11 @@ def poll():
             continue
 
         try:
-            ts = datetime.fromtimestamp(int(trade["timestamp"]), timezone.utc).strftime('%H:%M:%S UTC')
+            CEST = timezone(timedelta(hours=2))
+            ts = datetime.fromtimestamp(int(trade["timestamp"]), CEST).strftime('%H:%M:%S CEST')
         except Exception:
-            ts = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
+            CEST = timezone(timedelta(hours=2))
+            ts = datetime.now(CEST).strftime('%H:%M:%S CEST')
 
         payload = {
             "wallet":       wallet,
