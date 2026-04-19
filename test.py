@@ -1347,6 +1347,6 @@ if __name__ == "__main__":
     bot_thread.start()
 
     # Flask en main thread
-    port = int(os.getenv("PORT", 5000))
+    port = 5000
     print(f"🌐 API Flask en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
