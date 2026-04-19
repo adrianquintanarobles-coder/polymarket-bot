@@ -1310,11 +1310,26 @@ def bot_loop():
                         pasa = False
 
                     if pasa:
-                        if enviar_telegram(TELEGRAM_CHAT_ID_BASICO, mensaje_basico(payload, es_cebo)):
+                         if enviar_telegram(TELEGRAM_CHAT_ID_BASICO, mensaje_basico(payload, es_cebo)):
                             print(f"   {'🎣 Cebo' if es_cebo else '📡 Básico'} enviado: ${usd}")
                             señales_basico += 1
                             stats_dia["señales_basico"] += 1
-                            guardar_señal(payload, apodo, score, trade)  
+        
+                             # Guarda señal básica
+                            log = cargar_signals()
+                            log.append({
+                                "timestamp": payload["timestamp"],
+                                "fecha": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+                                "apodo": "Anónimo",
+                                "wallet": payload["wallet"][:12],
+                                "mercado": payload["market"],
+                                "usd": payload["usd_invested"],
+                                "prob": payload["price"],
+                                "resultado": "PENDIENTE",
+                                "tipo": "BASICO"
+                            })
+                            guardar_signals(log)
+        
                             guardar_estado()
 
                 time.sleep(0.5)
