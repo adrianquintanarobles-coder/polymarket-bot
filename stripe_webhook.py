@@ -238,6 +238,63 @@ def list_payments():
     return jsonify({"total": len(pagos), "pagos": pagos}), 200
 
 # ── INICIO ───────────────────────────────────────────────────────
+"""
+Añade esto a tu stripe_webhook.py existente
+"""
+
+@app.route("/api/create-checkout-session", methods=["POST"])
+def create_checkout_session():
+    """Crea una sesión de Stripe Checkout."""
+    try:
+        data = request.get_json()
+        email = data.get("email")
+        product_id = data.get("productId")  # prod_UMYL22pTpPyxNF
+        
+        if not email or not product_id:
+            return jsonify({"error": "Email and product ID required"}), 400
+        
+        # Obtener el precio del producto
+        products = stripe.Product.list(ids=[product_id])
+        if not products.data:
+            return jsonify({"error": "Product not found"}), 404
+        
+        product = products.data[0]
+        
+        # Obtener el precio (mensual)
+        prices = stripe.Price.list(product=product_id, type="recurring")
+        if not prices.data:
+            return jsonify({"error": "Price not found"}), 404
+        
+        price_id = prices.data[0].id
+        
+        # Crear sesión de Stripe Checkout
+        session = stripe.checkout.Session.create(
+            customer_email=email,
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price": price_id,
+                    "quantity": 1,
+                }
+            ],
+            mode="subscription",
+            success_url=f"{os.getenv('FRONTEND_URL', 'https://stately-choux-12871b.netlify.app')}/?success=true",
+            cancel_url=f"{os.getenv('FRONTEND_URL', 'https://stately-choux-12871b.netlify.app')}/?canceled=true",
+            metadata={
+                "product_name": product.name,
+                "telegram_link": TELEGRAM_CHANNEL_LINK,
+            }
+        )
+        
+        return jsonify({
+            "clientSecret": session.url,  # URL para redirigir
+            "sessionId": session.id,
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error creating checkout: {e}")
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
