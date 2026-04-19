@@ -430,6 +430,21 @@ def resolver_pendientes():
                 )
                 enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
 
+            # FOMO al canal básico solo si fue ACIERTO
+            if señal["resultado"] == "ACIERTO" and TELEGRAM_CHAT_ID_BASICO:
+                msg_fomo = (
+                    f"✅ <b>SEÑAL VIP VERIFICADA — ACIERTO</b>\n\n"
+                    f"Una ballena apostó <b>${señal['usd']:,.0f} USD</b> "
+                    f"en <b>{señal['posicion']}</b>\n"
+                    f"📋 {señal['mercado']}\n\n"
+                    f"<b>El mercado resolvió. La ballena acertó.</b>\n\n"
+                    f"<i>Los suscriptores VIP recibieron esta señal en tiempo real.</i>\n\n"
+                    f"👇 ¿La perdiste?\n"
+                    f"<a href=\"t.me/send?start=s-VIPaccess\">🔐 Unirse al VIP — $15/mes</a>"
+                )
+                enviar_telegram(TELEGRAM_CHAT_ID_BASICO, msg_fomo)
+                print(f"   📣 FOMO básico: {señal['apodo']}")
+
             time.sleep(0.5)
 
         except Exception as e:
@@ -526,6 +541,20 @@ def check_resumen_semanal():
     if TELEGRAM_CHAT_ID_VIP:
         enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
         print("   📅 Resumen semanal enviado")
+
+    # Resumen semanal simplificado al básico con FOMO
+    if TELEGRAM_CHAT_ID_BASICO:
+        msg_basico_semanal = (
+            f"📊 <b>Esta semana en PolyWhales VIP:</b>\n\n"
+            f"✅ <b>{acertadas} señales acertadas</b>\n"
+            f"❌ {falladas} falladas\n"
+            f"⏳ {pendientes} pendientes\n"
+            f"🎯 Tasa de acierto: <b>{tasa}</b>\n\n"
+            f"<i>Las mejores señales las reciben primero los VIP.</i>\n\n"
+            f"<a href=\"t.me/send?start=s-VIPaccess\">🔐 Unirse al VIP — $15/mes</a>"
+        )
+        enviar_telegram(TELEGRAM_CHAT_ID_BASICO, msg_basico_semanal)
+        print("   📣 Resumen semanal FOMO al básico")
 
 # ════════════════════════════════════════════════════════════════
 #  RESUMEN DIARIO
@@ -1194,7 +1223,7 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v3.8")
+    print("🚀 Polymarket Smart Money Tracker v3.9")
     print(f"   Básico : >${MIN_USD_BASICO}–${MAX_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
     print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
