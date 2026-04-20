@@ -1346,6 +1346,23 @@ def get_stats():
 def health():
     return jsonify({"status": "ok"})
 
+@app.route("/api/signals", methods=["GET"])
+def get_signals():
+    try:
+        conn = get_db()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 50")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return jsonify({
+            "signals": [dict(r) for r in rows],
+            "total": len(rows),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 def poll_loop():
     global ciclo_actual
