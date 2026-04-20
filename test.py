@@ -1325,13 +1325,20 @@ def get_stats():
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) as total, SUM(usd) as volume FROM signals WHERE resultado != 'PENDIENTE'")
+        cur.execute("""
+            SELECT 
+                COUNT(*) as total,
+                COALESCE(SUM(usd), 0) as volume
+            FROM signals
+        """)
         result = cur.fetchone()
         cur.close()
         conn.close()
         
         total = result[0] if result[0] else 0
-        volume = result[1] if result[1] else 0
+        volume = float(result[1]) if result[1] else 0.0
+        
+        print(f"   📊 API Stats: total={total}, volume=${volume}")
         
         return jsonify({
             "total_signals": total,
@@ -1340,6 +1347,7 @@ def get_stats():
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
     except Exception as e:
+        print(f"   ❌ API error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/health", methods=["GET"])
