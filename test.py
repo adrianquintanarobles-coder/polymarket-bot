@@ -20,6 +20,9 @@ import psycopg2.extras
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 from pathlib import Path
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import threading
 
 # ── CONFIGURACIÓN ────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -1302,18 +1305,50 @@ def poll():
 # ════════════════════════════════════════════════════════════════
 #  INICIO
 # ════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
+#  FLASK API
+# ══════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v4.0 — PostgreSQL")
-    print(f"   Básico : >${MIN_USD_BASICO}–${MAX_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
-    print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
-    print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
-    print(f"   Nuevas : Historial ballenas | Alta convicción | Divergencia")
-    print("─" * 50)
+app = Flask(__name__)
+CORS(app, 
+     resources={r"/api/*": {
+         "origins": "*",
+         "methods": ["GET", "POST", "OPTIONS"],
+         "allow_headers": ["Content-Type"],
+         "supports_credentials": False
+     }},
+     expose_headers=["Content-Type"]
+)
 
-    init_db()
-    cargar_estado()
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as total, SUM(usd) as volume FROM signals WHERE resultado != 'PENDIENTE'")
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        total = result[0] if result[0] else 0
+        volume = result[1] if result[1] else 0
+        
+        return jsonify({
+            "total_signals": total,
+            "success_rate": 0,
+            "total_volume": volume,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+def poll_loop():
+    global ciclo_actual
     while True:
         try:
             poll()
@@ -1325,3 +1360,22 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ Error inesperado: {e}")
             time.sleep(10)
+
+
+if __name__ == "__main__":
+    print("🚀 Polymarket Smart Money Tracker v4.0 — PostgreSQL + Flask")
+    print(f"   Básico : >${MIN_USD_BASICO}–${MAX_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
+    print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
+    print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
+    print(f"   Nuevas : Historial ballenas | Alta convicción | Divergencia")
+    print("─" * 50)
+
+    init_db()
+    cargar_estado()
+
+    # Bot en thread daemon
+    bot_thread = threading.Thread(target=poll_loop, daemon=True)
+    bot_thread.start()
+
+    # Flask en main thread
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
