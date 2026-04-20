@@ -1325,24 +1325,35 @@ def get_stats():
     try:
         conn = get_db()
         cur = conn.cursor()
+        
+        # Últimas 24 horas
         cur.execute("""
             SELECT 
                 COUNT(*) as total,
-                COALESCE(SUM(usd), 0) as volume
+                COALESCE(SUM(usd), 0) as volume,
+                COUNT(CASE WHEN resultado = 'ACIERTO' THEN 1 END) as wins,
+                COUNT(CASE WHEN resultado IN ('ACIERTO', 'FALLO') THEN 1 END) as resolved
             FROM signals
+            WHERE created_at >= NOW() - INTERVAL '24 hours'
         """)
         result = cur.fetchone()
-        cur.close()
-        conn.close()
         
         total = result[0] if result[0] else 0
         volume = float(result[1]) if result[1] else 0.0
+        wins = result[2] if result[2] else 0
+        resolved = result[3] if result[3] else 0
         
-        print(f"   📊 API Stats: total={total}, volume=${volume}")
+        # Calcular success rate (solo de mercados ya resueltos)
+        success_rate = (wins / resolved * 100) if resolved > 0 else 0
+        
+        cur.close()
+        conn.close()
+        
+        print(f"   📊 API Stats: total={total}, volume=${volume}, wins={wins}/{resolved}, rate={success_rate:.1f}%")
         
         return jsonify({
             "total_signals": total,
-            "success_rate": 0,
+            "success_rate": success_rate,  # ← Ahora es REAL (no hardcodeado en 0)
             "total_volume": volume,
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
