@@ -1,13 +1,11 @@
 """
-Polymarket Smart Money Tracker v3.8
+Polymarket Smart Money Tracker v4.1
 ─────────────────────────────────────────────────────────────────
-Nuevas mejoras respecto a v3.7:
-  1. Historial de ballenas → cada apodo muestra aciertos/fallos históricos
-     en el mensaje VIP: "El Oráculo | 8/10 aciertos (80%) 🔥"
-  2. Alta convicción → si la misma wallet vuelve al mismo mercado en <24h
-     manda alerta especial al VIP: "⚡ DOBLE APUESTA DETECTADA"
-  3. Divergencia de precio → si una ballena compra YES pero el precio baja
-     en los 5 min siguientes, alerta de ineficiencia al VIP
+Fixes v4.1:
+  1. condition_id / outcome_index — columnas DB consistentes
+  2. Timestamp CEST en resolver (no más UTC mismatch)
+  3. Score mínimo mejorado para ballenas nuevas
+  4. Umbrales en modo TEST ($100 VIP, ROI >5%)
 """
 
 import os
@@ -24,94 +22,56 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import threading
 
+# ── ZONA HORARIA ─────────────────────────────────────────────────
+CEST = timezone(timedelta(hours=2))
+
 # ── CONFIGURACIÓN ────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID_BASICO = os.getenv("TELEGRAM_CHAT_ID_BASICO")
 TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
+DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
-MIN_USD_BASICO      = 50
-MIN_ROI_BASICO      = 0
-MIN_USD_VIP         = 500
-MAX_USD_BASICO      = 499
-MIN_ROI_VIP         = 10
-PRECIO_MIN          = 0.15
-PRECIO_MAX          = 0.85
-
-# ── BASE DE DATOS ────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
-
-def get_db():
-    return psycopg2.connect(DATABASE_URL)
-
-def init_db():
-    """Crea la tabla de señales si no existe."""
-    try:
-        conn = get_db()
-        cur  = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id          SERIAL PRIMARY KEY,
-                timestamp   TEXT,
-                fecha       TEXT,
-                apodo       TEXT,
-                wallet      TEXT,
-                mercado     TEXT,
-                posicion    TEXT,
-                outcome     TEXT,
-                outcome_index INTEGER,
-                condition_id  TEXT,
-                usd         FLOAT,
-                prob        FLOAT,
-                roi_wallet  FLOAT,
-                score       INTEGER,
-                url         TEXT,
-                resultado   TEXT DEFAULT 'PENDIENTE',
-                created_at  TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("   🗄️  Base de datos inicializada")
-    except Exception as e:
-        print(f"   ⚠️  DB init error: {e}")
+MIN_USD_BASICO   = 50
+MAX_USD_BASICO   = 499
+MIN_ROI_BASICO   = 0
+MIN_USD_VIP      = 100    # TEST — cambiar a 500 en producción
+MIN_ROI_VIP      = 5      # TEST — cambiar a 10 en producción
+PRECIO_MIN       = 0.15
+PRECIO_MAX       = 0.85
 
 # ── PARÁMETROS OPERACIONALES ─────────────────────────────────────
-POLL_INTERVAL            = 5
-MAX_SEEN                 = 3000
-CACHE_TTL_HORAS          = 6
-WALLET_API_DELAY         = 0.3
-CEBO_PROBABILIDAD        = 4
-PERSIST_PATH             = Path("state.json")
-SIGNALS_LOG_PATH         = Path("signals_log.json")
-SAVE_EVERY_N_CYCLES      = 10
-ANTI_SPAM_MINUTOS        = 30
-MERCADO_CALIENTE_N       = 3
-MERCADO_CALIENTE_MIN     = 10
-RESOLVER_CADA_HORAS      = 1
-ALTA_CONVICCION_HORAS    = 24   # ventana para detectar doble apuesta
-DIVERGENCIA_MINUTOS      = 5    # minutos para revisar si el precio bajó
+POLL_INTERVAL         = 5
+MAX_SEEN              = 3000
+CACHE_TTL_HORAS       = 6
+WALLET_API_DELAY      = 0.3
+CEBO_PROBABILIDAD     = 4
+PERSIST_PATH          = Path("state.json")
+ANTI_SPAM_MINUTOS     = 15
+MERCADO_CALIENTE_N    = 3
+MERCADO_CALIENTE_MIN  = 10
+RESOLVER_CADA_HORAS   = 1
+ALTA_CONVICCION_HORAS = 24
+DIVERGENCIA_MINUTOS   = 5
 
 # ── ESTADO EN MEMORIA ────────────────────────────────────────────
-seen_hashes          = deque(maxlen=MAX_SEEN)
-whale_cache          = {}
-whale_streaks        = {}
-whale_apodos         = {}
-anti_spam            = {}
-mercado_hits         = defaultdict(list)
-ciclo_actual         = 0
-ultimo_resumen       = datetime.now(timezone.utc)
-ultima_resolucion    = datetime.now(timezone.utc) - timedelta(hours=2)
-ultimo_update_id     = 0
-
-# ── NUEVOS: estado para mejoras ──────────────────────────────────
-# {wallet: {slug: datetime}} — última vez que operó en cada mercado
+seen_hashes               = deque(maxlen=MAX_SEEN)
+whale_cache               = {}
+whale_streaks             = {}
+whale_apodos              = {}
+anti_spam                 = {}
+mercado_hits              = defaultdict(list)
+ciclo_actual              = 0
+ultimo_resumen            = datetime.now(timezone.utc)
+ultima_resolucion         = datetime.now(timezone.utc) - timedelta(hours=2)
+ultimo_update_id          = 0
 wallet_mercado_ultima_vez = defaultdict(dict)
-
-# Cola de divergencia: [(condition_id, outcome_index, precio_entrada, apodo, payload, ts)]
-cola_divergencia = deque(maxlen=200)
+cola_divergencia          = deque(maxlen=200)
+ultimo_lunes_enviado      = None
+ultimo_limpieza           = datetime.now(timezone.utc) - timedelta(hours=25)
+mensaje_pinned_id         = None
+ultimo_pin                = None
 
 stats_dia = {
     "señales_vip":    0,
@@ -178,185 +138,44 @@ En el canal <b>VIP ($15/mes)</b> recibes:
 👇 <b>Acceso inmediato al pagar:</b>
 <a href="t.me/send?start=s-VIPaccess">🔐 Unirse al VIP — $15/mes</a>"""
 
-# ── PIN STATE ────────────────────────────────────────────────────
-mensaje_pinned_id    = None
-ultimo_pin           = None
-ultimo_lunes_enviado = None
-ultimo_limpieza      = datetime.now(timezone.utc) - timedelta(hours=25)
-
 # ════════════════════════════════════════════════════════════════
-#  MEJORA 1: HISTORIAL DE BALLENAS
+#  BASE DE DATOS
 # ════════════════════════════════════════════════════════════════
 
-def get_historial_ballena(apodo: str) -> dict:
-    """
-    Calcula aciertos/fallos históricos de una ballena a partir del signals_log.
-    Devuelve {"aciertos": int, "fallos": int, "total": int, "tasa": str, "emoji": str}
-    """
-    log = cargar_signals()
-    señales_ballena = [s for s in log if s.get("apodo") == apodo and s.get("resultado") != "PENDIENTE"]
+def get_db():
+    return psycopg2.connect(DATABASE_URL)
 
-    total    = len(señales_ballena)
-    aciertos = sum(1 for s in señales_ballena if s.get("resultado") == "ACIERTO")
-    fallos   = sum(1 for s in señales_ballena if s.get("resultado") == "FALLO")
-
-    if total == 0:
-        return {"aciertos": 0, "fallos": 0, "total": 0, "tasa": "Nuevo", "emoji": "🆕"}
-
-    tasa_num = (aciertos / total) * 100
-    tasa_str = f"{tasa_num:.0f}%"
-
-    if tasa_num >= 75:   emoji = "🔥🔥🔥"
-    elif tasa_num >= 60: emoji = "🔥🔥"
-    elif tasa_num >= 50: emoji = "🔥"
-    else:                emoji = "⚠️"
-
-    return {
-        "aciertos": aciertos,
-        "fallos":   fallos,
-        "total":    total,
-        "tasa":     tasa_str,
-        "emoji":    emoji,
-    }
-
-def texto_historial(apodo: str) -> str:
-    h = get_historial_ballena(apodo)
-    if h["total"] == 0:
-        return "🆕 <b>Primera señal detectada</b>"
-    return (
-        f"📜 <b>Historial:</b> {h['aciertos']}/{h['total']} aciertos "
-        f"({h['tasa']}) {h['emoji']}"
-    )
-
-# ════════════════════════════════════════════════════════════════
-#  MEJORA 2: ALTA CONVICCIÓN (DOBLE APUESTA)
-# ════════════════════════════════════════════════════════════════
-
-def check_alta_conviccion(wallet: str, slug: str, apodo: str, payload: dict) -> bool:
-    """
-    Devuelve True si esta wallet ya operó en este mercado en las últimas
-    ALTA_CONVICCION_HORAS horas. Si es así, manda alerta especial al VIP.
-    """
-    ahora  = datetime.now(timezone.utc)
-    limite = ahora - timedelta(hours=ALTA_CONVICCION_HORAS)
-
-    ultima = wallet_mercado_ultima_vez[wallet].get(slug)
-
-    # Actualizamos el registro
-    wallet_mercado_ultima_vez[wallet][slug] = ahora
-
-    if ultima and ultima > limite:
-        # ¡Doble apuesta detectada!
-        diff_horas = (ahora - ultima).seconds // 3600
-        diff_min   = ((ahora - ultima).seconds % 3600) // 60
-        tiempo_txt = f"{diff_horas}h {diff_min}min" if diff_horas > 0 else f"{diff_min}min"
-
-        msg = (
-            f"⚡ <b>ALTA CONVICCIÓN — DOBLE APUESTA</b> ⚡\n\n"
-            f"🏷️ <b>{apodo}</b> ha vuelto al mismo mercado\n\n"
-            f"📋 <b>Mercado:</b> {payload['market']}\n"
-            f"🎯 <b>Posición:</b> {payload['side']} → <b>{payload['outcome']}</b>\n"
-            f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD\n"
-            f"⏱️ <b>Tiempo desde la última entrada:</b> {tiempo_txt}\n\n"
-            f"<i>Cuando una ballena repite mercado, su convicción es máxima.</i>\n\n"
-            f"🔗 <a href=\"{payload['url']}\">Ver mercado</a>"
-        )
-        if TELEGRAM_CHAT_ID_VIP:
-            enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
-            print(f"   ⚡ Alta convicción: {apodo} en {slug[:20]}")
-        return True
-
-    return False
-
-# ════════════════════════════════════════════════════════════════
-#  MEJORA 3: DIVERGENCIA DE PRECIO
-# ════════════════════════════════════════════════════════════════
-
-def registrar_para_divergencia(condition_id: str, outcome_index: int,
-                                precio_entrada: float, apodo: str, payload: dict):
-    """Añade la señal a la cola de divergencia para revisión posterior."""
-    if not condition_id or outcome_index < 0:
-        return
-    cola_divergencia.append({
-        "condition_id":   condition_id,
-        "outcome_index":  outcome_index,
-        "precio_entrada": precio_entrada,
-        "apodo":          apodo,
-        "market":         payload["market"],
-        "side":           payload["side"],
-        "outcome":        payload["outcome"],
-        "url":            payload["url"],
-        "usd":            payload["usd_invested"],
-        "ts":             datetime.now(timezone.utc),
-        "notificado":     False,
-    })
-
-def revisar_divergencias():
-    """
-    Revisa las señales en cola. Si han pasado DIVERGENCIA_MINUTOS y el precio
-    bajó ≥3% respecto a la entrada, manda alerta de divergencia al VIP.
-    """
-    ahora   = datetime.now(timezone.utc)
-    ventana = timedelta(minutes=DIVERGENCIA_MINUTOS)
-
-    for entrada in cola_divergencia:
-        if entrada["notificado"]:
-            continue
-        if ahora - entrada["ts"] < ventana:
-            continue
-
-        try:
-            r = requests.get(
-                f"https://gamma-api.polymarket.com/markets?conditionId={entrada['condition_id']}",
-                timeout=5
+def init_db():
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id            SERIAL PRIMARY KEY,
+                timestamp     TEXT,
+                fecha         TEXT,
+                apodo         TEXT,
+                wallet        TEXT,
+                mercado       TEXT,
+                posicion      TEXT,
+                outcome       TEXT,
+                outcome_index INTEGER,
+                condition_id  TEXT,
+                usd           FLOAT,
+                prob          FLOAT,
+                roi_wallet    FLOAT,
+                score         INTEGER,
+                url           TEXT,
+                resultado     TEXT DEFAULT 'PENDIENTE',
+                created_at    TIMESTAMP DEFAULT NOW()
             )
-            if not r.ok:
-                entrada["notificado"] = True
-                continue
-
-            mercados = r.json()
-            if not mercados:
-                entrada["notificado"] = True
-                continue
-
-            mercado    = mercados[0] if isinstance(mercados, list) else mercados
-            prices_raw = mercado.get("outcomePrices", "[]")
-            prices     = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-
-            if entrada["outcome_index"] >= len(prices):
-                entrada["notificado"] = True
-                continue
-
-            precio_actual = round(float(prices[entrada["outcome_index"]]) * 100, 1)
-            precio_entrada = entrada["precio_entrada"]
-            diff = precio_actual - precio_entrada
-
-            # Solo alerta si bajó ≥15 puntos porcentuales (bajada brutal)
-            if diff <= -15:
-                msg = (
-                    f"📉 <b>DIVERGENCIA DETECTADA</b> 📉\n\n"
-                    f"🏷️ <b>{entrada['apodo']}</b> compró pero el precio bajó\n\n"
-                    f"📋 <b>Mercado:</b> {entrada['market']}\n"
-                    f"🎯 <b>Posición:</b> {entrada['side']} → <b>{entrada['outcome']}</b>\n"
-                    f"💰 <b>USD invertido:</b> ${entrada['usd']:,.2f}\n"
-                    f"📊 <b>Precio entrada:</b> {precio_entrada}%\n"
-                    f"📉 <b>Precio actual:</b> {precio_actual}% ({diff:.1f}%)\n\n"
-                    f"<i>El mercado no ha seguido a la ballena — posible ineficiencia o entrada temprana.</i>\n\n"
-                    f"🔗 <a href=\"{entrada['url']}\">Ver mercado</a>"
-                )
-                if TELEGRAM_CHAT_ID_VIP:
-                    enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
-                    print(f"   📉 Divergencia: {entrada['apodo']} | {diff:.1f}%")
-
-            entrada["notificado"] = True
-
-        except Exception as e:
-            print(f"   ⚠️  Divergencia error: {e}")
-            entrada["notificado"] = True
-
-# ════════════════════════════════════════════════════════════════
-#  SIGNALS LOG
-# ════════════════════════════════════════════════════════════════
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("   🗄️  Base de datos inicializada")
+    except Exception as e:
+        print(f"   ⚠️  DB init error: {e}")
 
 def cargar_signals() -> list:
     try:
@@ -370,9 +189,6 @@ def cargar_signals() -> list:
     except Exception as e:
         print(f"   ⚠️  DB cargar error: {e}")
         return []
-
-def guardar_signals(log: list):
-    pass  # No usado con DB — se usa guardar_señal_db directamente
 
 def guardar_señal(payload: dict, apodo: str, score: int, trade: dict):
     try:
@@ -406,7 +222,133 @@ def guardar_señal(payload: dict, apodo: str, score: int, trade: dict):
         print(f"   ⚠️  No se pudo guardar señal: {e}")
 
 # ════════════════════════════════════════════════════════════════
-#  RESOLUCIÓN AUTOMÁTICA
+#  HISTORIAL DE BALLENAS
+# ════════════════════════════════════════════════════════════════
+
+def get_historial_ballena(apodo: str) -> dict:
+    log = cargar_signals()
+    resueltas = [s for s in log if s.get("apodo") == apodo and s.get("resultado") in ("ACIERTO", "FALLO")]
+    total    = len(resueltas)
+    aciertos = sum(1 for s in resueltas if s.get("resultado") == "ACIERTO")
+    fallos   = total - aciertos
+
+    if total == 0:
+        return {"aciertos": 0, "fallos": 0, "total": 0, "tasa": "Nuevo", "emoji": "🆕"}
+
+    tasa_num = (aciertos / total) * 100
+    tasa_str = f"{tasa_num:.0f}%"
+    if tasa_num >= 75:   emoji = "🔥🔥🔥"
+    elif tasa_num >= 60: emoji = "🔥🔥"
+    elif tasa_num >= 50: emoji = "🔥"
+    else:                emoji = "⚠️"
+
+    return {"aciertos": aciertos, "fallos": fallos, "total": total, "tasa": tasa_str, "emoji": emoji}
+
+# ════════════════════════════════════════════════════════════════
+#  ALTA CONVICCIÓN
+# ════════════════════════════════════════════════════════════════
+
+def check_alta_conviccion(wallet: str, slug: str, apodo: str, payload: dict) -> bool:
+    ahora  = datetime.now(timezone.utc)
+    limite = ahora - timedelta(hours=ALTA_CONVICCION_HORAS)
+    ultima = wallet_mercado_ultima_vez[wallet].get(slug)
+    wallet_mercado_ultima_vez[wallet][slug] = ahora
+
+    if ultima and ultima > limite:
+        diff_seg   = int((ahora - ultima).total_seconds())
+        diff_horas = diff_seg // 3600
+        diff_min   = (diff_seg % 3600) // 60
+        tiempo_txt = f"{diff_horas}h {diff_min}min" if diff_horas > 0 else f"{diff_min}min"
+        msg = (
+            f"⚡ <b>ALTA CONVICCIÓN — DOBLE APUESTA</b> ⚡\n\n"
+            f"🏷️ <b>{apodo}</b> ha vuelto al mismo mercado\n\n"
+            f"📋 <b>Mercado:</b> {payload['market']}\n"
+            f"🎯 <b>Posición:</b> {payload['side']} → <b>{payload['outcome']}</b>\n"
+            f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD\n"
+            f"⏱️ <b>Tiempo desde la última entrada:</b> {tiempo_txt}\n\n"
+            f"<i>Cuando una ballena repite mercado, su convicción es máxima.</i>\n\n"
+            f"🔗 <a href=\"{payload['url']}\">Ver mercado</a>"
+        )
+        if TELEGRAM_CHAT_ID_VIP:
+            enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+            print(f"   ⚡ Alta convicción: {apodo} en {slug[:20]}")
+        return True
+    return False
+
+# ════════════════════════════════════════════════════════════════
+#  DIVERGENCIA DE PRECIO
+# ════════════════════════════════════════════════════════════════
+
+def registrar_para_divergencia(condition_id: str, outcome_index: int,
+                                precio_entrada: float, apodo: str, payload: dict):
+    if not condition_id or outcome_index < 0:
+        return
+    cola_divergencia.append({
+        "condition_id":   condition_id,
+        "outcome_index":  outcome_index,
+        "precio_entrada": precio_entrada,
+        "apodo":          apodo,
+        "market":         payload["market"],
+        "side":           payload["side"],
+        "outcome":        payload["outcome"],
+        "url":            payload["url"],
+        "usd":            payload["usd_invested"],
+        "ts":             datetime.now(timezone.utc),
+        "notificado":     False,
+    })
+
+def revisar_divergencias():
+    ahora   = datetime.now(timezone.utc)
+    ventana = timedelta(minutes=DIVERGENCIA_MINUTOS)
+
+    for entrada in cola_divergencia:
+        if entrada["notificado"]:
+            continue
+        if ahora - entrada["ts"] < ventana:
+            continue
+        try:
+            r = requests.get(
+                f"https://gamma-api.polymarket.com/markets?conditionId={entrada['condition_id']}",
+                timeout=5
+            )
+            if not r.ok:
+                entrada["notificado"] = True
+                continue
+            mercados = r.json()
+            if not mercados:
+                entrada["notificado"] = True
+                continue
+            mercado    = mercados[0] if isinstance(mercados, list) else mercados
+            prices_raw = mercado.get("outcomePrices", "[]")
+            prices     = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+            if entrada["outcome_index"] >= len(prices):
+                entrada["notificado"] = True
+                continue
+            precio_actual  = round(float(prices[entrada["outcome_index"]]) * 100, 1)
+            precio_entrada = entrada["precio_entrada"]
+            diff           = precio_actual - precio_entrada
+            if diff <= -15:
+                msg = (
+                    f"📉 <b>DIVERGENCIA DETECTADA</b> 📉\n\n"
+                    f"🏷️ <b>{entrada['apodo']}</b> compró pero el precio bajó\n\n"
+                    f"📋 <b>Mercado:</b> {entrada['market']}\n"
+                    f"🎯 <b>Posición:</b> {entrada['side']} → <b>{entrada['outcome']}</b>\n"
+                    f"💰 <b>USD invertido:</b> ${entrada['usd']:,.2f}\n"
+                    f"📊 <b>Precio entrada:</b> {precio_entrada}%\n"
+                    f"📉 <b>Precio actual:</b> {precio_actual}% ({diff:.1f}%)\n\n"
+                    f"<i>El mercado no ha seguido a la ballena — posible ineficiencia o entrada temprana.</i>\n\n"
+                    f"🔗 <a href=\"{entrada['url']}\">Ver mercado</a>"
+                )
+                if TELEGRAM_CHAT_ID_VIP:
+                    enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+                    print(f"   📉 Divergencia: {entrada['apodo']} | {diff:.1f}%")
+            entrada["notificado"] = True
+        except Exception as e:
+            print(f"   ⚠️  Divergencia error: {e}")
+            entrada["notificado"] = True
+
+# ════════════════════════════════════════════════════════════════
+#  RESOLUCIÓN AUTOMÁTICA  (FIX: usa condition_id / outcome_index)
 # ════════════════════════════════════════════════════════════════
 
 def resolver_pendientes():
@@ -414,10 +356,10 @@ def resolver_pendientes():
     ahora = datetime.now(timezone.utc)
     if ahora - ultima_resolucion < timedelta(hours=RESOLVER_CADA_HORAS):
         return
-
     ultima_resolucion = ahora
-    log = cargar_signals()
-    pendientes = [s for s in log if s.get("resultado") == "PENDIENTE" and s.get("conditionId")]
+
+    log        = cargar_signals()
+    pendientes = [s for s in log if s.get("resultado") == "PENDIENTE" and s.get("condition_id")]
 
     if not pendientes:
         return
@@ -426,8 +368,8 @@ def resolver_pendientes():
     actualizadas = 0
 
     for señal in pendientes:
-        condition_id  = señal.get("conditionId", "")
-        outcome_index = señal.get("outcomeIndex", -1)
+        condition_id  = señal.get("condition_id", "")
+        outcome_index = señal.get("outcome_index", -1)
         if not condition_id or outcome_index == -1:
             continue
 
@@ -438,33 +380,27 @@ def resolver_pendientes():
             )
             if not r.ok:
                 continue
-
             mercados = r.json()
             if not mercados:
                 continue
-
             mercado = mercados[0] if isinstance(mercados, list) else mercados
             if not mercado.get("closed", False) and not mercado.get("resolved", False):
                 continue
 
-            outcome_prices_raw = mercado.get("outcomePrices", "[]")
-            outcome_prices = json.loads(outcome_prices_raw) if isinstance(outcome_prices_raw, str) else outcome_prices_raw
-
-            if outcome_index >= len(outcome_prices):
+            prices_raw = mercado.get("outcomePrices", "[]")
+            prices     = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+            if outcome_index >= len(prices):
                 continue
 
-            precio_final = float(outcome_prices[outcome_index])
-
+            precio_final = float(prices[outcome_index])
             if precio_final >= 0.9:
                 resultado = "ACIERTO"
-                emoji = "✅"
+                emoji     = "✅"
             elif precio_final <= 0.1:
                 resultado = "FALLO"
-                emoji = "❌"
+                emoji     = "❌"
             else:
                 continue
-
-            señal["resultado"] = resultado
 
             # Actualizar en DB
             try:
@@ -480,18 +416,22 @@ def resolver_pendientes():
             except Exception as e:
                 print(f"   ⚠️  DB update error: {e}")
 
+            señal["resultado"] = resultado
             actualizadas += 1
             print(f"   {emoji} Resuelto: {señal['apodo']} → {resultado}")
 
-            # Calcular tiempo transcurrido desde la señal
+            # Tiempo transcurrido desde la señal (CEST)
             try:
-                ts_señal = datetime.strptime(señal["timestamp"], '%H:%M:%S UTC').replace(
-                    tzinfo=timezone.utc,
-                    year=datetime.now(timezone.utc).year,
-                    month=datetime.now(timezone.utc).month,
-                    day=datetime.now(timezone.utc).day
+                ts_str = señal.get("timestamp", "")
+                ts_señal = datetime.strptime(ts_str, '%H:%M:%S CEST').replace(
+                    tzinfo=CEST,
+                    year=datetime.now(CEST).year,
+                    month=datetime.now(CEST).month,
+                    day=datetime.now(CEST).day
                 )
-                diff_seg = (datetime.now(timezone.utc) - ts_señal).seconds
+                diff_seg = int((datetime.now(CEST) - ts_señal).total_seconds())
+                if diff_seg < 0:
+                    diff_seg += 86400  # cruzó medianoche
                 if diff_seg >= 3600:
                     tiempo_txt = f"hace {diff_seg // 3600}h {(diff_seg % 3600) // 60}min"
                 else:
@@ -499,22 +439,26 @@ def resolver_pendientes():
             except Exception:
                 tiempo_txt = "hace un momento"
 
+            # Notificación VIP
             if TELEGRAM_CHAT_ID_VIP:
                 h = get_historial_ballena(señal["apodo"])
-                historial_txt = f"\n📜 <b>Historial:</b> {h['aciertos']}/{h['total']} aciertos ({h['tasa']}) {h['emoji']}" if h["total"] > 0 else ""
+                historial_txt = (
+                    f"\n📜 <b>Historial:</b> {h['aciertos']}/{h['total']} aciertos ({h['tasa']}) {h['emoji']}"
+                    if h["total"] > 0 else ""
+                )
                 msg_vip = (
                     f"{emoji} <b>RESULTADO CONFIRMADO</b>\n\n"
                     f"🐋 <b>{señal['apodo']}</b> apostó {tiempo_txt}:\n"
                     f"📋 {señal['mercado']}\n"
                     f"🎯 {señal['posicion']} — <b>${señal['usd']:,.0f} USD</b> al {señal['prob']}%\n\n"
-                    f"<b>El mercado resolvió → {emoji} {'Acertó' if señal['resultado'] == 'ACIERTO' else 'Falló'}</b>"
+                    f"<b>El mercado resolvió → {emoji} {'Acertó' if resultado == 'ACIERTO' else 'Falló'}</b>"
                     f"{historial_txt}\n\n"
                     f"🔗 <a href=\"{señal['url']}\">Ver mercado</a>"
                 )
                 enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg_vip)
 
-            # FOMO al canal básico solo si fue ACIERTO
-            if señal["resultado"] == "ACIERTO" and TELEGRAM_CHAT_ID_BASICO:
+            # FOMO al básico solo si ACIERTO
+            if resultado == "ACIERTO" and TELEGRAM_CHAT_ID_BASICO:
                 msg_fomo = (
                     f"✅ <b>SEÑAL VIP VERIFICADA — ACIERTO</b>\n\n"
                     f"{tiempo_txt} detectamos esta jugada:\n"
@@ -553,11 +497,11 @@ def generar_texto_resultados() -> str:
     resueltas  = acertadas + falladas
     tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aún"
 
-    ultimas = log[-5:][::-1]
+    ultimas     = log[-5:][::-1]
     ultimas_txt = ""
     for s in ultimas:
-        emoji = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
-        ultimas_txt += f"\n{emoji} <b>{s['apodo']}</b>\n"
+        e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
+        ultimas_txt += f"\n{e} <b>{s['apodo']}</b>\n"
         ultimas_txt += f"   {s['mercado'][:40]}\n"
         ultimas_txt += f"   {s['posicion']} | Score {s.get('score', '?')}\n"
 
@@ -591,7 +535,10 @@ def check_resumen_semanal():
         return
 
     hace_7_dias = ahora - timedelta(days=7)
-    semana = [s for s in log if datetime.strptime(s["fecha"], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= hace_7_dias]
+    semana = [
+        s for s in log
+        if datetime.strptime(s["fecha"], '%Y-%m-%d').replace(tzinfo=timezone.utc) >= hace_7_dias
+    ]
     if not semana:
         return
 
@@ -602,14 +549,14 @@ def check_resumen_semanal():
     resueltas  = acertadas + falladas
     tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "En curso"
 
-    top = sorted(semana, key=lambda x: x.get("score", 0), reverse=True)[:3]
+    top     = sorted(semana, key=lambda x: x.get("score", 0), reverse=True)[:3]
     top_txt = ""
     for s in top:
-        emoji = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
+        e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
         h = get_historial_ballena(s["apodo"])
-        top_txt += f"\n{emoji} <b>{s['apodo']}</b> ({h['tasa']} histórico)\n   {s['mercado'][:40]}\n   Score {s.get('score','?')}\n"
+        top_txt += f"\n{e} <b>{s['apodo']}</b> ({h['tasa']} histórico)\n   {s['mercado'][:40]}\n   Score {s.get('score','?')}\n"
 
-    msg = (
+    msg_vip = (
         f"📅 <b>RESUMEN SEMANAL VIP</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🐋 <b>Señales esta semana:</b> {total_sem}\n"
@@ -619,14 +566,12 @@ def check_resumen_semanal():
         f"🎯 <b>Tasa de acierto:</b> {tasa}\n\n"
         f"🏆 <b>Top señales:</b>{top_txt}"
     )
-
     if TELEGRAM_CHAT_ID_VIP:
-        enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
-        print("   📅 Resumen semanal enviado")
+        enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg_vip)
+        print("   📅 Resumen semanal VIP enviado")
 
-    # Resumen semanal simplificado al básico con FOMO
     if TELEGRAM_CHAT_ID_BASICO:
-        msg_basico_semanal = (
+        msg_basico = (
             f"📊 <b>Esta semana en PolyWhales VIP:</b>\n\n"
             f"✅ <b>{acertadas} señales acertadas</b>\n"
             f"❌ {falladas} falladas\n"
@@ -635,7 +580,7 @@ def check_resumen_semanal():
             f"<i>Las mejores señales las reciben primero los VIP.</i>\n\n"
             f"<a href=\"t.me/send?start=s-VIPaccess\">🔐 Unirse al VIP — $15/mes</a>"
         )
-        enviar_telegram(TELEGRAM_CHAT_ID_BASICO, msg_basico_semanal)
+        enviar_telegram(TELEGRAM_CHAT_ID_BASICO, msg_basico)
         print("   📣 Resumen semanal FOMO al básico")
 
 # ════════════════════════════════════════════════════════════════
@@ -665,7 +610,6 @@ def check_resumen_diario():
         f"👛 <b>Ballenas únicas:</b> {n_wallets}\n\n"
         f"🔥 <b>Mercados más activos:</b>\n{top_txt}"
     )
-
     if TELEGRAM_CHAT_ID_VIP:
         enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
 
@@ -788,8 +732,8 @@ def limpiar_mensajes_antiguos():
 
 def procesar_nuevos_miembros(updates: list):
     for update in updates:
-        msg     = update.get("message", {})
-        nuevos  = msg.get("new_chat_members", [])
+        msg    = update.get("message", {})
+        nuevos = msg.get("new_chat_members", [])
         chat_id = str(msg.get("chat", {}).get("id", ""))
         if nuevos and chat_id == TELEGRAM_CHAT_ID_BASICO:
             print("   👋 Nuevo miembro")
@@ -893,7 +837,6 @@ def verificar_wallet(wallet: str):
     )
     if r is None:
         return None, None
-
     if r.status_code == 404:
         whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
         print("404")
@@ -902,7 +845,6 @@ def verificar_wallet(wallet: str):
     try:
         r.raise_for_status()
         posiciones = r.json()
-
         if not posiciones:
             whale_cache[wallet] = {"roi": None, "perfil": None, "ts": ahora}
             print("sin posiciones")
@@ -934,22 +876,28 @@ def verificar_wallet(wallet: str):
         return None, None
 
 # ════════════════════════════════════════════════════════════════
-#  SCORE DE CONFIANZA
+#  SCORE DE CONFIANZA  (FIX: score mínimo más generoso)
 # ════════════════════════════════════════════════════════════════
 
 def calcular_score(usd: float, roi: float, racha: int, caliente: bool, historial: dict) -> int:
     score = 0
+    # USD invertido
     if usd >= 5000:   score += 35
-    elif usd >= 2000: score += 25
-    elif usd >= 1000: score += 15
-    else:             score += 8
+    elif usd >= 2000: score += 28
+    elif usd >= 1000: score += 20
+    elif usd >= 500:  score += 14
+    else:             score += 10
+    # ROI
     if roi >= 75:     score += 25
     elif roi >= 50:   score += 20
-    elif roi >= 25:   score += 12
-    elif roi >= 10:   score += 6
+    elif roi >= 25:   score += 14
+    elif roi >= 10:   score += 8
+    else:             score += 4
+    # Racha
     score += min(racha * 4, 15)
+    # Mercado caliente
     if caliente:      score += 8
-    # Bonus por historial
+    # Bonus historial
     if historial["total"] >= 5:
         tasa_num = (historial["aciertos"] / historial["total"]) * 100
         if tasa_num >= 75:   score += 17
@@ -1038,7 +986,7 @@ DATOS:
         return None
 
 # ════════════════════════════════════════════════════════════════
-#  MENSAJES
+#  PRECIO ACTUAL
 # ════════════════════════════════════════════════════════════════
 
 def get_precio_actual(condition_id: str, outcome_index: int):
@@ -1062,6 +1010,10 @@ def get_precio_actual(condition_id: str, outcome_index: int):
     except Exception:
         pass
     return None
+
+# ════════════════════════════════════════════════════════════════
+#  MENSAJES
+# ════════════════════════════════════════════════════════════════
 
 def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
     cebo_txt = ""
@@ -1102,7 +1054,6 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
     else:
         precio_txt = f"\n📊 <b>Probabilidad:</b> {payload['price']}%"
 
-    # Historial de la ballena
     if historial["total"] >= 3:
         hist_txt = f"\n📜 <b>Historial:</b> {historial['aciertos']}/{historial['total']} aciertos ({historial['tasa']}) {historial['emoji']}"
     elif historial["total"] > 0:
@@ -1165,7 +1116,7 @@ def enviar_telegram(chat_id: str, texto: str) -> bool:
 def poll():
     global ciclo_actual
     ciclo_actual += 1
-    print(f"\n🔍 Ciclo {ciclo_actual} — {datetime.now().strftime('%H:%M:%S')}")
+    print(f"\n🔍 Ciclo {ciclo_actual} — {datetime.now(CEST).strftime('%H:%M:%S CEST')}")
 
     procesar_comandos()
     check_resumen_diario()
@@ -1218,10 +1169,8 @@ def poll():
             continue
 
         try:
-            CEST = timezone(timedelta(hours=2))
             ts = datetime.fromtimestamp(int(trade["timestamp"]), CEST).strftime('%H:%M:%S CEST')
         except Exception:
-            CEST = timezone(timedelta(hours=2))
             ts = datetime.now(CEST).strftime('%H:%M:%S CEST')
 
         payload = {
@@ -1252,7 +1201,6 @@ def poll():
             racha = whale_streaks[wallet]
             score = calcular_score(usd, roi, racha, caliente, historial)
 
-            # Mejora 2: check alta convicción
             check_alta_conviccion(wallet, slug, apodo, payload)
 
             print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd} | Score {score} | Hist {historial['tasa']}")
@@ -1272,8 +1220,6 @@ def poll():
                 stats_dia["señales_vip"] += 1
                 stats_dia["wallets_vip"].add(wallet)
                 stats_dia["mercados_vip"].append(payload["market"])
-
-                # Mejora 3: registrar para divergencia
                 registrar_para_divergencia(condition_id, outcome_index, payload["price"], apodo, payload)
 
             if caliente and TELEGRAM_CHAT_ID_BASICO:
@@ -1282,11 +1228,12 @@ def poll():
 
         # ── BÁSICO ───────────────────────────────────────────────
         if TELEGRAM_CHAT_ID_BASICO:
-            es_cebo = False
             if not es_vip and usd >= MIN_USD_BASICO and usd <= MAX_USD_BASICO and roi >= MIN_ROI_BASICO:
-                pasa = True
+                pasa    = True
+                es_cebo = False
             elif es_vip and random.randint(1, CEBO_PROBABILIDAD) == 1:
-                pasa = True; es_cebo = True
+                pasa    = True
+                es_cebo = True
             else:
                 pasa = False
 
@@ -1297,20 +1244,15 @@ def poll():
                     stats_dia["señales_basico"] += 1
                     guardar_estado()
 
-        time.sleep(0.5)
-
     guardar_estado()
     print(f"📊 Trades: {len(trades)} | Básico: {señales_basico} | VIP: {señales_vip} | Cache: {len(whale_cache)}")
 
 # ════════════════════════════════════════════════════════════════
-#  INICIO
-# ════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════
 #  FLASK API
-# ══════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
-CORS(app, 
+CORS(app,
      resources={r"/api/*": {
          "origins": "*",
          "methods": ["GET", "POST", "OPTIONS"],
@@ -1324,11 +1266,9 @@ CORS(app,
 def get_stats():
     try:
         conn = get_db()
-        cur = conn.cursor()
-        
-        # Últimas 24 horas
+        cur  = conn.cursor()
         cur.execute("""
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 COALESCE(SUM(usd), 0) as volume,
                 COUNT(CASE WHEN resultado = 'ACIERTO' THEN 1 END) as wins,
@@ -1337,25 +1277,18 @@ def get_stats():
             WHERE created_at >= NOW() - INTERVAL '24 hours'
         """)
         result = cur.fetchone()
-        
-        total = result[0] if result[0] else 0
-        volume = float(result[1]) if result[1] else 0.0
-        wins = result[2] if result[2] else 0
-        resolved = result[3] if result[3] else 0
-        
-        # Calcular success rate (solo de mercados ya resueltos)
+        total    = result[0] or 0
+        volume   = float(result[1]) if result[1] else 0.0
+        wins     = result[2] or 0
+        resolved = result[3] or 0
         success_rate = (wins / resolved * 100) if resolved > 0 else 0
-        
         cur.close()
         conn.close()
-        
-        print(f"   📊 API Stats: total={total}, volume=${volume}, wins={wins}/{resolved}, rate={success_rate:.1f}%")
-        
         return jsonify({
             "total_signals": total,
-            "success_rate": success_rate,  # ← Ahora es REAL (no hardcodeado en 0)
-            "total_volume": volume,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "success_rate":  success_rate,
+            "total_volume":  volume,
+            "timestamp":     datetime.now(timezone.utc).isoformat()
         })
     except Exception as e:
         print(f"   ❌ API error: {e}")
@@ -1369,22 +1302,24 @@ def health():
 def get_signals():
     try:
         conn = get_db()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT * FROM signals ORDER BY id DESC LIMIT 50")
         rows = cur.fetchall()
         cur.close()
         conn.close()
         return jsonify({
-            "signals": [dict(r) for r in rows],
-            "total": len(rows),
+            "signals":   [dict(r) for r in rows],
+            "total":     len(rows),
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ════════════════════════════════════════════════════════════════
+#  INICIO
+# ════════════════════════════════════════════════════════════════
 
 def poll_loop():
-    global ciclo_actual
     while True:
         try:
             poll()
@@ -1397,21 +1332,18 @@ def poll_loop():
             print(f"❌ Error inesperado: {e}")
             time.sleep(10)
 
-
 if __name__ == "__main__":
-    print("🚀 Polymarket Smart Money Tracker v4.0 — PostgreSQL + Flask")
+    print("🚀 Polymarket Smart Money Tracker v4.1")
     print(f"   Básico : >${MIN_USD_BASICO}–${MAX_USD_BASICO} USD | ROI >{MIN_ROI_BASICO}%")
     print(f"   VIP    : >${MIN_USD_VIP} USD | ROI >{MIN_ROI_VIP}%")
     print(f"   Precio : {int(PRECIO_MIN*100)}%–{int(PRECIO_MAX*100)}%")
-    print(f"   Nuevas : Historial ballenas | Alta convicción | Divergencia")
+    print(f"   Fixes  : condition_id DB | CEST resolver | Score mejorado")
     print("─" * 50)
 
     init_db()
     cargar_estado()
 
-    # Bot en thread daemon
     bot_thread = threading.Thread(target=poll_loop, daemon=True)
     bot_thread.start()
 
-    # Flask en main thread
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
