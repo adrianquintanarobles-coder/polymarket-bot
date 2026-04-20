@@ -72,6 +72,9 @@ ultimo_lunes_enviado      = None
 ultimo_limpieza           = datetime.now(timezone.utc) - timedelta(hours=25)
 mensaje_pinned_id         = None
 ultimo_pin                = None
+ultimo_contador_basico    = datetime.now(timezone.utc) - timedelta(hours=25)
+wallets_conocidas         = set()
+consenso_tracker          = defaultdict(list)
 
 stats_dia = {
     "señales_vip":    0,
@@ -556,6 +559,7 @@ def check_resumen_semanal():
         h = get_historial_ballena(s["apodo"])
         top_txt += f"\n{e} <b>{s['apodo']}</b> ({h['tasa']} histórico)\n   {s['mercado'][:40]}\n   Score {s.get('score','?')}\n"
 
+    ranking_txt = get_ranking_ballenas()
     msg_vip = (
         f"📅 <b>RESUMEN SEMANAL VIP</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -565,6 +569,7 @@ def check_resumen_semanal():
         f"⏳ <b>Pendientes:</b> {pendientes}\n"
         f"🎯 <b>Tasa de acierto:</b> {tasa}\n\n"
         f"🏆 <b>Top señales:</b>{top_txt}"
+        f"{ranking_txt}"
     )
     if TELEGRAM_CHAT_ID_VIP:
         enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg_vip)
@@ -1015,25 +1020,55 @@ def get_precio_actual(condition_id: str, outcome_index: int):
 #  MENSAJES
 # ════════════════════════════════════════════════════════════════
 
+FRASES_INTRIGA = [
+    "\U0001f440 Una ballena acaba de moverse en silencio",
+    "\U0001f988 Movimiento inteligente detectado",
+    "\U0001f50d Wallet verificada en accion",
+    "\u26a1 Trader rentable acaba de entrar",
+    "\U0001f9e0 Dinero inteligente en movimiento",
+    "\U0001f3af Operacion calculada detectada",
+]
+
 def mensaje_basico(payload: dict, es_cebo: bool = False) -> str:
-    cebo_txt = ""
+    frase = random.choice(FRASES_INTRIGA)
     if es_cebo:
-        cebo_txt = (
-            "\n\n⭐ <b>SEÑAL VIP FILTRADA</b>\n"
-            "Esta wallet tiene perfil verificado y opera con sumas mayores.\n"
-            "<i>En VIP recibes historial de aciertos, alertas de convicción y análisis IA.</i>"
-        )
-    return (
-        f"📡 <b>SEÑAL DETECTADA</b>\n\n"
-        f"📋 <b>Mercado:</b> {payload['market']}\n"
-        f"🎯 <b>Posición:</b> {payload['side']} → <b>{payload['outcome']}</b>\n"
-        f"💰 <b>Invertido:</b> ${payload['usd_invested']:,.2f} USD\n"
-        f"📊 <b>Probabilidad:</b> {payload['price']}%\n"
-        f"🔑 <b>Wallet:</b> <code>{payload['wallet'][:10]}...</code>\n\n"
-        f"🔗 <a href=\"{payload['url']}\">Ver en Polymarket</a>"
-        f"{cebo_txt}\n\n"
-        f"<i>⚠️ Canal básico — Actualiza a VIP para análisis completo.</i>"
-    )
+        lines = [
+            "\U0001f510 <b>SENAL VIP FILTRADA</b>",
+            "",
+            frase,
+            "",
+            "<b>Mercado:</b> " + payload["market"],
+            "<b>Posicion:</b> " + payload["side"] + " -> <b>" + payload["outcome"] + "</b>",
+            "<b>Invertido:</b> $" + "{:,.2f}".format(payload["usd_invested"]) + " USD",
+            "<b>Prob. entrada:</b> " + str(payload["price"]) + "%",
+            "",
+            "<b>\U0001f510 ROI, score y analisis IA en VIP</b>",
+            "<i>Esta ballena tiene historial verificado de aciertos.</i>",
+            "",
+            "\U0001f447 Que sabe esta wallet que tu no?",
+            '<a href="t.me/send?start=s-VIPaccess">\U0001f510 Unirse al VIP - $15/mes</a>',
+            "",
+            '<a href="' + payload["url"] + '">\U0001f517 Ver mercado</a>',
+            "<i>\u23f0 " + payload["timestamp"] + "</i>",
+        ]
+        return "\n".join(lines)
+    lines = [
+        "\U0001f4e1 <b>SENAL DETECTADA</b>",
+        "",
+        frase,
+        "",
+        "<b>Mercado:</b> " + payload["market"],
+        "<b>Posicion:</b> " + payload["side"] + " -> <b>" + payload["outcome"] + "</b>",
+        "<b>Invertido:</b> $" + "{:,.2f}".format(payload["usd_invested"]) + " USD",
+        "<b>Probabilidad:</b> " + str(payload["price"]) + "%",
+        "<b>Wallet:</b> <code>" + payload["wallet"][:10] + "...</code>",
+        "",
+        '<a href="' + payload["url"] + '">\U0001f517 Ver en Polymarket</a>',
+        "<i>\u23f0 " + payload["timestamp"] + "</i>",
+        "",
+        "<i>\U0001f510 Score, ROI y analisis completo en VIP</i>",
+    ]
+    return "\n".join(lines)
 
 def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
                 racha: int, score: int, caliente: bool,
@@ -1061,6 +1096,9 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
     else:
         hist_txt = "\n📜 <b>Historial:</b> Primera señal detectada 🆕"
 
+    ficha     = get_ficha_ballena(apodo, payload["wallet"])
+    ficha_txt = ("\n\n" + ficha) if ficha else ""
+
     return (
         f"🐋 <b>ALERTA VIP — BALLENA VERIFICADA</b> 🐋{racha_txt}{caliente_txt}\n\n"
         f"🏷️ <b>Apodo:</b> {apodo}\n"
@@ -1072,6 +1110,7 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
         f"{hist_txt}\n"
         f"🎯 <b>Score:</b> {score}/100 {score_emoji(score)}\n"
         f"🔑 <b>Wallet:</b> <code>{payload['wallet'][:10]}...</code>"
+        f"{ficha_txt}"
         f"{noticia_txt}{analisis_txt}\n\n"
         f"🔗 <a href=\"{payload['url']}\">Ver mercado en Polymarket</a>\n"
         f"⏰ {payload['timestamp']}"
@@ -1113,6 +1152,167 @@ def enviar_telegram(chat_id: str, texto: str) -> bool:
 #  BUCLE PRINCIPAL
 # ════════════════════════════════════════════════════════════════
 
+
+# ══════════════════════════════════════════════════════════════
+#  CONTADOR PUBLICO DE ACIERTOS
+# ══════════════════════════════════════════════════════════════
+
+def check_contador_basico():
+    global ultimo_contador_basico
+    ahora = datetime.now(timezone.utc)
+    if ahora - ultimo_contador_basico < timedelta(hours=6):
+        return
+    ultimo_contador_basico = ahora
+    log = cargar_signals()
+    if not log:
+        return
+    total     = len(log)
+    acertadas = sum(1 for s in log if s["resultado"] == "ACIERTO")
+    falladas  = sum(1 for s in log if s["resultado"] == "FALLO")
+    resueltas = acertadas + falladas
+    if resueltas < 3:
+        return
+    tasa = str(round(acertadas / resueltas * 100)) + "%"
+    lines = [
+        "\U0001f4ca <b>Track record PolyWhales VIP</b>",
+        "",
+        "\U0001f40b <b>" + str(total) + " senales</b> detectadas",
+        "\u2705 <b>" + str(acertadas) + " acertadas</b> -- tasa " + tasa,
+        "\u23f3 " + str(total - resueltas) + " pendientes de resolver",
+        "",
+        "<i>Cuantas perdiste por no estar en VIP?</i>",
+        "",
+        '<a href="t.me/send?start=s-VIPaccess">\U0001f510 Unirse al VIP -- $15/mes</a>',
+    ]
+    if TELEGRAM_CHAT_ID_BASICO:
+        enviar_telegram(TELEGRAM_CHAT_ID_BASICO, "\n".join(lines))
+        print("   Contador basico enviado")
+
+# ══════════════════════════════════════════════════════════════
+#  BALLENA NUEVA
+# ══════════════════════════════════════════════════════════════
+
+def check_ballena_nueva(wallet: str, apodo: str, payload: dict) -> bool:
+    if wallet.lower() in wallets_conocidas:
+        return False
+    wallets_conocidas.add(wallet.lower())
+    if payload["usd_invested"] < 1000:
+        return False
+    lines = [
+        "\U0001f195 <b>BALLENA NUEVA DETECTADA</b> \U0001f195",
+        "",
+        "Primera operacion registrada de esta wallet",
+        "",
+        "<b>Apodo asignado:</b> " + apodo,
+        "<b>Mercado:</b> " + payload["market"],
+        "<b>Posicion:</b> " + payload["side"] + " -> <b>" + payload["outcome"] + "</b>",
+        "<b>Invertido:</b> $" + "{:,.2f}".format(payload["usd_invested"]) + " USD",
+        "<b>Precio entrada:</b> " + str(payload["price"]) + "%",
+        "",
+        "<i>Insider? Institucion? Seguimiento activado</i>",
+        "",
+        '<a href="' + payload["url"] + '">\U0001f517 Ver mercado</a>',
+    ]
+    if TELEGRAM_CHAT_ID_VIP:
+        enviar_telegram(TELEGRAM_CHAT_ID_VIP, "\n".join(lines))
+        print("   Ballena nueva: " + apodo)
+    return True
+
+# ══════════════════════════════════════════════════════════════
+#  CONSENSO INSTITUCIONAL
+# ══════════════════════════════════════════════════════════════
+
+def check_consenso(wallet: str, slug: str, outcome: str, payload: dict):
+    ahora  = datetime.now(timezone.utc)
+    limite = ahora - timedelta(hours=1)
+    clave  = slug + "::" + outcome.lower()
+    consenso_tracker[clave] = [(w, ts) for w, ts in consenso_tracker[clave] if ts > limite]
+    wallets_clave = [w for w, _ in consenso_tracker[clave]]
+    if wallet.lower() not in wallets_clave:
+        consenso_tracker[clave].append((wallet.lower(), ahora))
+    if len(consenso_tracker[clave]) == 3:
+        lines = [
+            "\U0001f3db <b>CONSENSO INSTITUCIONAL</b> \U0001f3db",
+            "",
+            "<b>3 ballenas distintas</b> han apostado al mismo outcome en menos de 1 hora",
+            "",
+            "<b>Mercado:</b> " + payload["market"],
+            "<b>Outcome:</b> <b>" + outcome + "</b>",
+            "<b>Ultima entrada:</b> $" + "{:,.2f}".format(payload["usd_invested"]) + " USD",
+            "",
+            "<i>Cuando el dinero inteligente converge, el mercado suele seguirlo.</i>",
+            "",
+            '<a href="' + payload["url"] + '">\U0001f517 Ver mercado</a>',
+        ]
+        if TELEGRAM_CHAT_ID_VIP:
+            enviar_telegram(TELEGRAM_CHAT_ID_VIP, "\n".join(lines))
+            print("   Consenso institucional: " + slug[:25])
+
+# ══════════════════════════════════════════════════════════════
+#  FICHA DE BALLENA
+# ══════════════════════════════════════════════════════════════
+
+def get_ficha_ballena(apodo: str, wallet: str):
+    from collections import Counter as Cnt
+    log     = cargar_signals()
+    senales = [s for s in log if s.get("apodo") == apodo]
+    if len(senales) < 5:
+        return None
+    total_usd = sum(s.get("usd", 0) for s in senales)
+    resueltas = [s for s in senales if s.get("resultado") in ("ACIERTO", "FALLO")]
+    aciertos  = sum(1 for s in resueltas if s.get("resultado") == "ACIERTO")
+    tasa      = str(round(aciertos / len(resueltas) * 100)) + "%" if resueltas else "En curso"
+    mercados  = Cnt(s.get("mercado", "")[:30] for s in senales)
+    merc_txt  = " | ".join(m for m, _ in mercados.most_common(2))
+    outcomes  = Cnt(s.get("outcome", "") for s in senales)
+    espec     = outcomes.most_common(1)[0][0] if outcomes else "Variada"
+    return (
+        "\U0001f4c4 <b>" + apodo + " -- Ficha</b>\n"
+        "\U0001f4b0 Total invertido: $" + "{:,.0f}".format(total_usd) + "\n"
+        "\U0001f3af Tasa de acierto: " + tasa + " (" + str(aciertos) + "/" + str(len(resueltas)) + ")\n"
+        "\U0001f4cb Mercados: " + merc_txt + "\n"
+        "\u26a1 Outcome frecuente: " + espec
+    )
+
+# ══════════════════════════════════════════════════════════════
+#  RANKING SEMANAL DE BALLENAS
+# ══════════════════════════════════════════════════════════════
+
+def get_ranking_ballenas() -> str:
+    from collections import Counter as Cnt
+    log = cargar_signals()
+    if not log:
+        return ""
+    hace_7 = datetime.now(timezone.utc) - timedelta(days=7)
+    semana  = [
+        s for s in log
+        if datetime.strptime(s["fecha"], "%Y-%m-%d").replace(tzinfo=timezone.utc) >= hace_7
+        and s.get("resultado") in ("ACIERTO", "FALLO")
+    ]
+    if not semana:
+        return ""
+    stats = {}
+    for s in semana:
+        a = s.get("apodo", "?")
+        if a not in stats:
+            stats[a] = {"aciertos": 0, "total": 0}
+        stats[a]["total"] += 1
+        if s.get("resultado") == "ACIERTO":
+            stats[a]["aciertos"] += 1
+    ranking = sorted(
+        [(ap, d["aciertos"], d["total"]) for ap, d in stats.items() if d["total"] >= 2],
+        key=lambda x: (x[1] / x[2] if x[2] > 0 else 0, x[2]),
+        reverse=True
+    )[:3]
+    if not ranking:
+        return ""
+    medals = ["\U0001f947", "\U0001f948", "\U0001f949"]
+    txt = "\n\U0001f3c6 <b>Ranking ballenas esta semana:</b>\n"
+    for i, (apodo, aciertos, total) in enumerate(ranking):
+        tasa = str(round(aciertos / total * 100)) + "%"
+        txt += medals[i] + " <b>" + apodo + "</b> -- " + str(aciertos) + "/" + str(total) + " (" + tasa + ")\n"
+    return txt
+
 def poll():
     global ciclo_actual
     ciclo_actual += 1
@@ -1121,6 +1321,7 @@ def poll():
     procesar_comandos()
     check_resumen_diario()
     check_resumen_semanal()
+    check_contador_basico()
     resolver_pendientes()
     revisar_divergencias()
     fijar_mensaje_vip()
@@ -1202,6 +1403,8 @@ def poll():
             score = calcular_score(usd, roi, racha, caliente, historial)
 
             check_alta_conviccion(wallet, slug, apodo, payload)
+            check_ballena_nueva(wallet, apodo, payload)
+            check_consenso(wallet, slug, payload["outcome"], payload)
 
             print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd} | Score {score} | Hist {historial['tasa']}")
             noticia       = buscar_noticia(trade.get("title", ""))
