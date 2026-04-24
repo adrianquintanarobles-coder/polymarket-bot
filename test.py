@@ -845,7 +845,7 @@ def procesar_comandos():
                 texto_res = generar_texto_resultados()
                 try:
                     url_tg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                    requests.post(url_tg, json={"chat_id": chat_id, "text": texto_res, "parse_mode": "MarkdownV2"}, timeout=10)
+                    requests.post(url_tg, json={"chat_id": chat_id, "text": texto_res}, timeout=10)
                 except Exception:
                     enviar_telegram(chat_id, texto_res)
 
