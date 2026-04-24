@@ -35,7 +35,7 @@ WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
 WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
 STRIPE_SECRET_KEY       = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET   = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TNpFHLQKsHvzszRsKQ5Pk78")
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "price_1TPlswLbIeIY3uS5asHz9g5V")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
@@ -2177,7 +2177,10 @@ def create_checkout_session():
     try:
         stripe.api_key = STRIPE_SECRET_KEY
         data      = request.get_json() or {}
-        price_id  = data.get("price_id", STRIPE_PRICE_ID)
+        # Siempre usar el price de Railway, ignorar el del frontend
+        price_id  = STRIPE_PRICE_ID or data.get("price_id", "")
+        if not price_id:
+            price_id = data.get("price_id", "")
         base_url  = request.headers.get("Origin", "https://polywhalesbot.adrianquintanarobles.workers.dev")
 
         session = stripe.checkout.Session.create(
