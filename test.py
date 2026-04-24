@@ -15,6 +15,7 @@ import random
 import requests
 import psycopg2
 import psycopg2.extras
+import stripe
 from datetime import datetime, timezone, timedelta
 from collections import deque, defaultdict
 from pathlib import Path
@@ -32,14 +33,17 @@ TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
 WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
 WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
+STRIPE_SECRET_KEY       = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET   = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TNpFHLQKsHvzszRsKQ5Pk78")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO   = 50
 MAX_USD_BASICO   = 499
 MIN_ROI_BASICO   = 0
-MIN_USD_VIP      = 500    # TEST — cambiar a 500 en producción
-MIN_ROI_VIP      = 10      # TEST — cambiar a 10 en producción
+MIN_USD_VIP      = 100    # TEST — cambiar a 500 en producción
+MIN_ROI_VIP      = 5      # TEST — cambiar a 10 en producción
 PRECIO_MIN       = 0.15
 PRECIO_MAX       = 0.85
 
@@ -2107,6 +2111,83 @@ def whop_start():
 # ════════════════════════════════════════════════════════════════
 #  INICIO
 # ════════════════════════════════════════════════════════════════
+
+@app.route("/api/create-checkout-session", methods=["POST", "OPTIONS"])
+def create_checkout_session():
+    if request.method == "OPTIONS":
+        return "", 200
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        data      = request.get_json() or {}
+        price_id  = data.get("price_id", STRIPE_PRICE_ID)
+        base_url  = request.headers.get("Origin", "https://smart-money-pulse-59.adrianquintanarobles.workers.dev")
+
+        session = stripe.checkout.Session.create(
+            mode="subscription",
+            line_items=[{"price": price_id, "quantity": 1}],
+            subscription_data={"trial_period_days": 3},
+            success_url=f"https://t.me/PolyWhalesAutomatic_bot?start=stripe_vip",
+            cancel_url=f"{base_url}/?cancelled=true",
+            allow_promotion_codes=True,
+            billing_address_collection="auto",
+        )
+        return jsonify({"url": session.url})
+    except Exception as e:
+        print(f"   ❌ Stripe checkout error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stripe-webhook", methods=["POST"])
+def stripe_webhook():
+    payload    = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            event = stripe.Event.construct_from(request.get_json(), stripe.api_key)
+    except Exception as e:
+        print(f"   ⚠️  Stripe webhook error: {e}")
+        return jsonify({"error": str(e)}), 400
+
+    stripe.api_key = STRIPE_SECRET_KEY
+    etype = event["type"]
+    print(f"   📦 Stripe webhook: {etype}")
+
+    if etype in ("customer.subscription.created", "customer.subscription.updated"):
+        sub    = event["data"]["object"]
+        status = sub.get("status", "")
+        if status in ("active", "trialing"):
+            customer_id = sub.get("customer", "")
+            try:
+                customer = stripe.Customer.retrieve(customer_id)
+                nombre   = customer.get("name") or customer.get("email", "VIP")
+                stripe_id = customer_id
+                añadir_vip_user(f"stripe_{stripe_id}", nombre, stripe_id)
+                enviar_telegram("1387775814",
+                    f"💰 <b>NUEVO SUSCRIPTOR VIP — STRIPE</b>\n\n"
+                    f"👤 {nombre}\n"
+                    f"🆔 Stripe ID: {stripe_id}\n"
+                    f"📊 Estado: {status}\n\n"
+                    f"<i>Cuando escriba /start al bot quedará activado.</i>"
+                )
+                print(f"   ✅ Stripe VIP: {nombre}")
+            except Exception as e:
+                print(f"   ⚠️  Stripe customer error: {e}")
+
+    elif etype == "customer.subscription.deleted":
+        sub         = event["data"]["object"]
+        customer_id = sub.get("customer", "")
+        eliminar_vip_user(f"stripe_{customer_id}")
+        enviar_telegram("1387775814",
+            f"❌ <b>SUSCRIPCIÓN CANCELADA — STRIPE</b>\n\n"
+            f"🆔 Stripe ID: {customer_id}"
+        )
+        print(f"   ❌ Stripe cancelación: {customer_id}")
+
+    return jsonify({"ok": True})
+
 
 def poll_loop():
     while True:
