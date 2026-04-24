@@ -643,10 +643,14 @@ def generar_texto_resultados() -> str:
         ultimas_txt += f"\n{e} {clean(s['apodo'])} (Score {s.get('score','?')})\n    {mercado}\n"
 
     return (
-        f"TRACK RECORD\n"
-        f"Total: {total}  Acertadas: {acertadas}  Falladas: {falladas}  Pendientes: {pendientes}\n"
-        f"Tasa de acierto: {tasa}\n"
-        f"\nUltimas senales:{ultimas_txt}"
+        f"📈 TRACK RECORD\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Total señales: {total}\n"
+        f"✅ Acertadas: {acertadas}\n"
+        f"❌ Falladas: {falladas}\n"
+        f"⏳ Pendientes: {pendientes}\n"
+        f"🎯 Tasa de acierto: {tasa}\n"
+        f"\n📋 Últimas señales:{ultimas_txt}"
     )
 
 # ════════════════════════════════════════════════════════════════
