@@ -30,6 +30,8 @@ TELEGRAM_BOT_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID_BASICO = os.getenv("TELEGRAM_CHAT_ID_BASICO")
 TELEGRAM_CHAT_ID_VIP    = os.getenv("TELEGRAM_CHAT_ID_VIP")
 ANTHROPIC_API_KEY       = os.getenv("ANTHROPIC_API_KEY")
+WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
+WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
@@ -175,12 +177,90 @@ def init_db():
                 created_at    TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vip_users (
+                chat_id    TEXT PRIMARY KEY,
+                nombre     TEXT,
+                whop_id    TEXT,
+                added_at   TIMESTAMP DEFAULT NOW()
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
         print("   🗄️  Base de datos inicializada")
     except Exception as e:
         print(f"   ⚠️  DB init error: {e}")
+
+# ════════════════════════════════════════════════════════════════
+#  VIP USERS — gestión automática
+# ════════════════════════════════════════════════════════════════
+
+def es_vip_user(chat_id: str) -> bool:
+    if chat_id in {"1387775814", str(TELEGRAM_CHAT_ID_VIP), str(TELEGRAM_CHAT_ID_BASICO)}:
+        return True
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("SELECT 1 FROM vip_users WHERE chat_id = %s", (chat_id,))
+        result = cur.fetchone()
+        cur.close(); conn.close()
+        return result is not None
+    except Exception:
+        return False
+
+def añadir_vip_user(chat_id: str, nombre: str, whop_id: str = "") -> bool:
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute(
+            "INSERT INTO vip_users (chat_id, nombre, whop_id) VALUES (%s,%s,%s) ON CONFLICT (chat_id) DO UPDATE SET nombre=%s, whop_id=%s",
+            (chat_id, nombre, whop_id, nombre, whop_id)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+        print(f"   ✅ VIP añadido: {nombre} ({chat_id})")
+        return True
+    except Exception as e:
+        print(f"   ⚠️  Error añadiendo VIP: {e}")
+        return False
+
+def eliminar_vip_user(chat_id: str) -> bool:
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("DELETE FROM vip_users WHERE chat_id = %s", (chat_id,))
+        conn.commit()
+        cur.close(); conn.close()
+        print(f"   🗑️  VIP eliminado: {chat_id}")
+        return True
+    except Exception as e:
+        print(f"   ⚠️  Error eliminando VIP: {e}")
+        return False
+
+def listar_vip_users() -> list:
+    try:
+        conn = get_db()
+        cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT * FROM vip_users ORDER BY added_at DESC")
+        rows = cur.fetchall()
+        cur.close(); conn.close()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+def generar_lista_ballenas() -> str:
+    from collections import Counter as Cnt
+    log = cargar_signals()
+    if not log:
+        return "No hay señales registradas aún."
+    apodos = Cnt(s.get("apodo") for s in log)
+    txt = "🐋 <b>BALLENAS ACTIVAS</b>\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for apodo, n in apodos.most_common(10):
+        h = get_historial_ballena(apodo)
+        txt += f"• <b>{apodo}</b> — {n} señales | {h['tasa']} {h['emoji']}\n"
+    txt += "\n<i>Usa /ballena [apodo] para ver la ficha completa</i>"
+    return txt
 
 def cargar_signals() -> list:
     try:
@@ -658,29 +738,124 @@ def procesar_comandos():
             return
         updates = r.json().get("result", [])
         procesar_nuevos_miembros(updates)
+
         for update in updates:
             ultimo_update_id = update["update_id"]
             msg     = update.get("message", {})
-            texto   = msg.get("text", "").strip().lower()
+            texto   = msg.get("text", "").strip()
             chat_id = str(msg.get("chat", {}).get("id", ""))
+            nombre  = msg.get("from", {}).get("first_name", "VIP")
+            texto_l = texto.lower()
 
-            canales = {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO, "1387775814"}
-            if chat_id not in canales:
+            if not texto or not chat_id:
                 continue
 
-            if "/resultados" in texto:
+            es_admin   = chat_id == "1387775814"
+            es_canal   = chat_id in {TELEGRAM_CHAT_ID_VIP, TELEGRAM_CHAT_ID_BASICO}
+            es_vip     = es_vip_user(chat_id)
+
+            # ── /start — cualquiera puede iniciarlo ─────────────
+            if texto_l.startswith("/start"):
+                # Registrar chat_id real cuando escriben /start
+                # Esto vincula al usuario con su pago de Whop
+                añadir_vip_user(chat_id, nombre)
+                es_vip = es_vip_user(chat_id)
+
+                if es_vip:
+                    enviar_telegram(chat_id,
+                        f"🐋 <b>Bienvenido al VIP, {nombre}!</b>\n\n"
+                        f"Tienes acceso completo a todos los comandos:\n\n"
+                        f"📊 /resultados — Track record completo\n"
+                        f"🐋 /ballena [apodo] — Ficha de una ballena\n"
+                        f"   Ejemplo: /ballena El Oráculo\n"
+                        f"📋 /lista — Todas las ballenas activas\n"
+                        f"ℹ️ /ayuda — Ver todos los comandos\n\n"
+                        f"<i>Las señales llegan automáticamente al canal VIP.</i>"
+                    )
+                else:
+                    enviar_telegram(chat_id,
+                        f"👋 <b>Hola {nombre}!</b>\n\n"
+                        f"Soy el bot de PolyWhales 🐋\n\n"
+                        f"Para acceder a los comandos VIP necesitas suscribirte:\n\n"
+                        f"<a href=\"https://whop.com/PolyWhales\">🔐 Suscribirse al VIP — $15/mes</a>\n\n"
+                        f"<i>Una vez suscrito recibirás acceso automáticamente.</i>"
+                    )
+                continue
+
+            # ── /ayuda ───────────────────────────────────────────
+            if texto_l.startswith("/ayuda") or texto_l.startswith("/help"):
+                if es_vip:
+                    enviar_telegram(chat_id,
+                        f"🐋 <b>Comandos PolyWhales VIP</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📊 /resultados — Track record completo\n"
+                        f"🐋 /ballena [apodo] — Ficha de una ballena\n"
+                        f"   Ejemplo: /ballena El Oráculo\n"
+                        f"📋 /lista — Todas las ballenas activas\n\n"
+                        f"<i>Las señales llegan al canal VIP automáticamente.</i>"
+                    )
+                continue
+
+            # ── Comandos VIP (requieren acceso) ─────────────────
+            if not es_vip and not es_canal:
+                enviar_telegram(chat_id,
+                    f"🔒 Necesitas suscripción VIP para usar este comando.\n\n"
+                    f"<a href=\"https://whop.com/PolyWhales\">🔐 Suscribirse — $15/mes</a>"
+                )
+                continue
+
+            if "/resultados" in texto_l:
                 print(f"   📩 /resultados desde {chat_id}")
                 enviar_telegram(chat_id, generar_texto_resultados())
 
-            elif texto.startswith("/ballena"):
-                partes = texto.replace("/ballena", "").strip()
+            elif texto_l.startswith("/ballena"):
+                partes = texto[8:].strip()
                 if partes:
-                    # buscar por apodo (case insensitive)
                     apodo_buscado = partes.title()
                     print(f"   📩 /ballena {apodo_buscado} desde {chat_id}")
                     enviar_telegram(chat_id, generar_ficha_completa(apodo_buscado))
                 else:
-                    enviar_telegram(chat_id, "Uso: /ballena [apodo]\nEjemplo: /ballena El Oráculo")
+                    enviar_telegram(chat_id,
+                        "🐋 Uso: /ballena [apodo]\nEjemplo: /ballena El Oráculo\n\n"
+                        "Usa /lista para ver todas las ballenas."
+                    )
+
+            elif texto_l.startswith("/lista"):
+                print(f"   📩 /lista desde {chat_id}")
+                enviar_telegram(chat_id, generar_lista_ballenas())
+
+            # ── Comandos admin ───────────────────────────────────
+            elif texto_l.startswith("/addvip") and es_admin:
+                partes = texto[7:].strip().split()
+                if len(partes) >= 1:
+                    target_id = partes[0]
+                    target_nombre = " ".join(partes[1:]) if len(partes) > 1 else "VIP"
+                    if añadir_vip_user(target_id, target_nombre):
+                        enviar_telegram(chat_id, f"✅ VIP añadido: {target_nombre} ({target_id})")
+                        enviar_telegram(target_id,
+                            f"🐋 <b>¡Bienvenido al VIP, {target_nombre}!</b>\n\n"
+                            f"Ya tienes acceso a todos los comandos:\n\n"
+                            f"📊 /resultados\n"
+                            f"🐋 /ballena [apodo]\n"
+                            f"📋 /lista\n"
+                            f"ℹ️ /ayuda"
+                        )
+
+            elif texto_l.startswith("/removevip") and es_admin:
+                partes = texto[10:].strip()
+                if partes:
+                    if eliminar_vip_user(partes):
+                        enviar_telegram(chat_id, f"✅ VIP eliminado: {partes}")
+
+            elif texto_l.startswith("/listvips") and es_admin:
+                vips = listar_vip_users()
+                if vips:
+                    txt = f"👑 <b>VIPs activos: {len(vips)}</b>\n\n"
+                    for v in vips[:20]:
+                        txt += f"• {v['nombre']} — {v['chat_id']}\n"
+                    enviar_telegram(chat_id, txt)
+                else:
+                    enviar_telegram(chat_id, "No hay VIPs registrados.")
 
     except Exception as e:
         print(f"   ⚠️  Comandos: {e}")
@@ -1850,6 +2025,82 @@ def get_signals():
             "total":     len(rows),
             "timestamp": datetime.now(timezone.utc).isoformat()
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/whop-webhook", methods=["POST"])
+def whop_webhook():
+    """
+    Whop llama a este endpoint cuando alguien paga o cancela.
+    Configurar en Whop -> Desarrollador -> Webhooks -> URL: https://tudominio.railway.app/api/whop-webhook
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "no data"}), 400
+
+        event = data.get("event", "")
+        print(f"   📦 Whop webhook: {event}")
+
+        # Pago completado o suscripción renovada
+        if event in ("membership.went_valid", "payment.succeeded"):
+            membership = data.get("data", {})
+            user       = membership.get("user", {})
+            whop_id    = str(user.get("id", ""))
+            nombre     = user.get("name") or user.get("username") or "VIP"
+            telegram   = user.get("telegram_username", "")
+
+            print(f"   💰 Nuevo VIP: {nombre} | Whop: {whop_id} | TG: {telegram}")
+
+            # Guardar en DB — el chat_id se actualiza cuando el usuario escribe /start
+            añadir_vip_user(f"whop_{whop_id}", nombre, whop_id)
+
+            # Notificar al admin
+            if TELEGRAM_CHAT_ID_VIP:
+                enviar_telegram("1387775814",
+                    f"💰 <b>NUEVO SUSCRIPTOR VIP</b>\n\n"
+                    f"👤 {nombre}\n"
+                    f"🆔 Whop ID: {whop_id}\n"
+                    f"📱 Telegram: @{telegram if telegram else 'no vinculado'}\n\n"
+                    f"<i>Cuando escriba /start al bot quedará activado automáticamente.</i>"
+                )
+
+        # Cancelación o expiración
+        elif event in ("membership.went_invalid", "membership.expired"):
+            membership = data.get("data", {})
+            user       = membership.get("user", {})
+            whop_id    = str(user.get("id", ""))
+            nombre     = user.get("name") or user.get("username") or "VIP"
+
+            print(f"   ❌ VIP cancelado: {nombre} | Whop: {whop_id}")
+            eliminar_vip_user(f"whop_{whop_id}")
+
+            enviar_telegram("1387775814",
+                f"❌ <b>VIP CANCELADO</b>\n\n"
+                f"👤 {nombre}\n"
+                f"🆔 Whop ID: {whop_id}"
+            )
+
+        return jsonify({"ok": True})
+
+    except Exception as e:
+        print(f"   ⚠️  Whop webhook error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/whop-start", methods=["POST"])
+def whop_start():
+    """
+    Cuando el usuario escribe /start al bot, si tiene whop_id pendiente
+    actualizamos su chat_id real en la DB.
+    """
+    try:
+        data    = request.get_json()
+        chat_id = str(data.get("chat_id", ""))
+        nombre  = data.get("nombre", "VIP")
+        if not chat_id:
+            return jsonify({"error": "no chat_id"}), 400
+        añadir_vip_user(chat_id, nombre)
+        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
