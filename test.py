@@ -1975,7 +1975,7 @@ CORS(app,
          "origins": [
              "*",
              "https://polywhalesbot.adrianquintanarobles.workers.dev",
-             "https://smart-money-pulse-59.adrianquintanarobles.workers.dev",
+             "https://polywhalesbot.adrianquintanarobles.workers.dev",
              "http://localhost:8080",
              "http://localhost:3000",
          ],
@@ -2133,7 +2133,7 @@ def create_checkout_session():
         stripe.api_key = STRIPE_SECRET_KEY
         data      = request.get_json() or {}
         price_id  = data.get("price_id", STRIPE_PRICE_ID)
-        base_url  = request.headers.get("Origin", "https://smart-money-pulse-59.adrianquintanarobles.workers.dev")
+        base_url  = request.headers.get("Origin", "https://polywhalesbot.adrianquintanarobles.workers.dev")
 
         session = stripe.checkout.Session.create(
             mode="subscription",
