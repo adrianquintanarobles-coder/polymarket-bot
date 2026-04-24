@@ -35,7 +35,7 @@ WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
 WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
 STRIPE_SECRET_KEY       = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET   = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "price_1TPlswLbIeIY3uS5asHz9g5V")
+STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TNpFHLQKsHvzszRsKQ5Pk78")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
@@ -632,23 +632,18 @@ def generar_texto_resultados() -> str:
     resueltas  = acertadas + falladas
     tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aún"
 
-    ultimas     = log[-5:][::-1]
+    ultimas     = log[-3:][::-1]
     ultimas_txt = ""
     for s in ultimas:
         e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
-        ultimas_txt += f"\n{e} <b>{s['apodo']}</b>\n"
-        ultimas_txt += f"   {s['mercado'][:40]}\n"
-        ultimas_txt += f"   {s['posicion']} | Score {s.get('score', '?')}\n"
+        mercado_corto = s['mercado'][:30] + "..." if len(s['mercado']) > 30 else s['mercado']
+        ultimas_txt += f"\n{e} <b>{s['apodo']}</b> | Score {s.get('score', '?')}\n   {mercado_corto}\n"
 
     return (
-        f"📈 <b>TRACK RECORD</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📊 <b>Total señales:</b> {total}\n"
-        f"✅ <b>Acertadas:</b> {acertadas}\n"
-        f"❌ <b>Falladas:</b> {falladas}\n"
-        f"⏳ <b>Pendientes:</b> {pendientes}\n"
-        f"🎯 <b>Tasa de acierto:</b> {tasa}\n\n"
-        f"<b>Últimas señales:</b>\n{ultimas_txt}"
+        f"📊 TRACK RECORD\n"
+        f"Total: {total} | ✅ {acertadas} | ❌ {falladas} | ⏳ {pendientes}\n"
+        f"Tasa: {tasa}\n\n"
+        f"Ultimas señales:{ultimas_txt}"
     )
 
 # ════════════════════════════════════════════════════════════════
