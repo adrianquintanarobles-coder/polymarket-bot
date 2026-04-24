@@ -189,12 +189,46 @@ def init_db():
                 added_at   TIMESTAMP DEFAULT NOW()
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_config (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         conn.commit()
         cur.close()
         conn.close()
         print("   🗄️  Base de datos inicializada")
     except Exception as e:
         print(f"   ⚠️  DB init error: {e}")
+
+# ════════════════════════════════════════════════════════════════
+#  BOT CONFIG — persistencia en DB
+# ════════════════════════════════════════════════════════════════
+
+def get_config(key: str) -> str | None:
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute("SELECT value FROM bot_config WHERE key = %s", (key,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+def set_config(key: str, value: str):
+    try:
+        conn = get_db()
+        cur  = conn.cursor()
+        cur.execute(
+            "INSERT INTO bot_config (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value=%s",
+            (key, value, value)
+        )
+        conn.commit()
+        cur.close(); conn.close()
+    except Exception as e:
+        print(f"   ⚠️  Config DB error: {e}")
 
 # ════════════════════════════════════════════════════════════════
 #  VIP USERS — gestión automática
@@ -873,6 +907,16 @@ def fijar_mensaje_vip():
     if not TELEGRAM_CHAT_ID_BASICO or not TELEGRAM_BOT_TOKEN:
         return
     ahora = datetime.now(timezone.utc)
+
+    # Cargar ultimo_pin desde DB si no está en memoria
+    if ultimo_pin is None:
+        stored = get_config("ultimo_pin")
+        if stored:
+            try:
+                ultimo_pin = datetime.fromisoformat(stored)
+            except Exception:
+                ultimo_pin = None
+
     if ultimo_pin and ahora - ultimo_pin < timedelta(days=7):
         return
     try:
@@ -891,6 +935,7 @@ def fijar_mensaje_vip():
         )
         mensaje_pinned_id = msg_id
         ultimo_pin        = ahora
+        set_config("ultimo_pin", ahora.isoformat())
         print("   📌 Mensaje VIP fijado")
     except Exception as e:
         print(f"   ⚠️  Pin VIP: {e}")
