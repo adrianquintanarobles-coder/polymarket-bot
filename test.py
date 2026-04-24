@@ -632,18 +632,20 @@ def generar_texto_resultados() -> str:
     resueltas  = acertadas + falladas
     tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aún"
 
+    def esc(t): return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
     ultimas     = log[-3:][::-1]
     ultimas_txt = ""
     for s in ultimas:
         e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
-        mercado_corto = s['mercado'][:30] + "..." if len(s['mercado']) > 30 else s['mercado']
-        ultimas_txt += f"\n{e} <b>{s['apodo']}</b> | Score {s.get('score', '?')}\n   {mercado_corto}\n"
+        mercado_corto = esc(s['mercado'][:30]) + "..." if len(s['mercado']) > 30 else esc(s['mercado'])
+        ultimas_txt += f"\n{e} <b>{esc(s['apodo'])}</b> | Score {s.get('score', '?')}\n   {mercado_corto}\n"
 
     return (
-        f"📊 TRACK RECORD\n"
+        f"📊 <b>TRACK RECORD</b>\n"
         f"Total: {total} | ✅ {acertadas} | ❌ {falladas} | ⏳ {pendientes}\n"
-        f"Tasa: {tasa}\n\n"
-        f"Ultimas señales:{ultimas_txt}"
+        f"Tasa: <b>{tasa}</b>\n\n"
+        f"<b>Ultimas señales:</b>{ultimas_txt}"
     )
 
 # ════════════════════════════════════════════════════════════════
