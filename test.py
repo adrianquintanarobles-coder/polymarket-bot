@@ -1972,13 +1972,26 @@ def poll():
 app = Flask(__name__)
 CORS(app,
      resources={r"/api/*": {
-         "origins": "*",
+         "origins": [
+             "*",
+             "https://polywhalesbot.adrianquintanarobles.workers.dev",
+             "https://smart-money-pulse-59.adrianquintanarobles.workers.dev",
+             "http://localhost:8080",
+             "http://localhost:3000",
+         ],
          "methods": ["GET", "POST", "OPTIONS"],
-         "allow_headers": ["Content-Type"],
+         "allow_headers": ["Content-Type", "Authorization"],
          "supports_credentials": False
      }},
      expose_headers=["Content-Type"]
 )
+
+@app.after_request
+def after_request(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+    return response
 
 @app.route("/api/stats", methods=["GET"])
 def get_stats():
