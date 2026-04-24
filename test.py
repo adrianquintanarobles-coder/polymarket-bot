@@ -75,6 +75,8 @@ ultimo_pin                = None
 ultimo_contador_basico    = datetime.now(timezone.utc) - timedelta(hours=25)
 wallets_conocidas         = set()
 consenso_tracker          = defaultdict(list)
+racha_aciertos            = defaultdict(int)  # {apodo: racha_actual}
+ultimo_resumen_nocturno   = datetime.now(timezone.utc) - timedelta(hours=25)
 
 stats_dia = {
     "señales_vip":    0,
@@ -387,8 +389,6 @@ def resolver_pendientes():
             if not mercados:
                 continue
             mercado = mercados[0] if isinstance(mercados, list) else mercados
-            if not mercado.get("closed", False) and not mercado.get("resolved", False):
-                continue
 
             prices_raw = mercado.get("outcomePrices", "[]")
             prices     = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
@@ -396,10 +396,23 @@ def resolver_pendientes():
                 continue
 
             precio_final = float(prices[outcome_index])
-            if precio_final >= 0.9:
+            cerrado      = mercado.get("closed", False) or mercado.get("resolved", False)
+
+            # Método 1: mercado oficialmente cerrado
+            # Método 2: precio extremo aunque no esté cerrado (≥95% o ≤5%)
+            if cerrado:
+                if precio_final >= 0.9:
+                    resultado = "ACIERTO"
+                    emoji     = "✅"
+                elif precio_final <= 0.1:
+                    resultado = "FALLO"
+                    emoji     = "❌"
+                else:
+                    continue
+            elif precio_final >= 0.95:
                 resultado = "ACIERTO"
                 emoji     = "✅"
-            elif precio_final <= 0.1:
+            elif precio_final <= 0.05:
                 resultado = "FALLO"
                 emoji     = "❌"
             else:
@@ -420,6 +433,7 @@ def resolver_pendientes():
                 print(f"   ⚠️  DB update error: {e}")
 
             señal["resultado"] = resultado
+            check_racha_aciertos(señal["apodo"])
             actualizadas += 1
             print(f"   {emoji} Resuelto: {señal['apodo']} → {resultado}")
 
@@ -657,6 +671,16 @@ def procesar_comandos():
             if "/resultados" in texto:
                 print(f"   📩 /resultados desde {chat_id}")
                 enviar_telegram(chat_id, generar_texto_resultados())
+
+            elif texto.startswith("/ballena"):
+                partes = texto.replace("/ballena", "").strip()
+                if partes:
+                    # buscar por apodo (case insensitive)
+                    apodo_buscado = partes.title()
+                    print(f"   📩 /ballena {apodo_buscado} desde {chat_id}")
+                    enviar_telegram(chat_id, generar_ficha_completa(apodo_buscado))
+                else:
+                    enviar_telegram(chat_id, "Uso: /ballena [apodo]\nEjemplo: /ballena El Oráculo")
 
     except Exception as e:
         print(f"   ⚠️  Comandos: {e}")
@@ -1081,10 +1105,18 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
     if precio_actual and precio_actual != payload['price']:
         diff   = precio_actual - payload['price']
         flecha = "📈" if diff > 0 else "📉"
+        # Advertencia si la diferencia es brutal
+        if diff <= -15:
+            aviso = f"\n⚠️ <b>PRECIO CAYÓ {diff:.1f}% desde la entrada — entrada temprana o ineficiencia</b>"
+        elif diff >= 15:
+            aviso = f"\n🚀 <b>PRECIO SUBIÓ +{diff:.1f}% desde la entrada — momentum confirmado</b>"
+        else:
+            aviso = ""
         precio_txt = (
             f"\n📊 <b>Precio entrada:</b> {payload['price']}%"
             f"\n{flecha} <b>Precio ahora:</b> {precio_actual}% "
             f"({'+'if diff>0 else ''}{diff:.1f}%)"
+            f"{aviso}"
         )
     else:
         precio_txt = f"\n📊 <b>Probabilidad:</b> {payload['price']}%"
@@ -1096,8 +1128,9 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
     else:
         hist_txt = "\n📜 <b>Historial:</b> Primera señal detectada 🆕"
 
-    ficha     = get_ficha_ballena(apodo, payload["wallet"])
-    ficha_txt = ("\n\n" + ficha) if ficha else ""
+    ficha        = get_ficha_ballena(apodo, payload["wallet"])
+    ficha_txt    = ("\n\n" + ficha) if ficha else ""
+    objetivo_txt = calcular_precio_objetivo(payload["price"], historial, payload["usd_invested"])
 
     return (
         f"🐋 <b>ALERTA VIP — BALLENA VERIFICADA</b> 🐋{racha_txt}{caliente_txt}\n\n"
@@ -1111,6 +1144,7 @@ def mensaje_vip(payload: dict, apodo: str, noticia, analisis,
         f"🎯 <b>Score:</b> {score}/100 {score_emoji(score)}\n"
         f"🔑 <b>Wallet:</b> <code>{payload['wallet'][:10]}...</code>"
         f"{ficha_txt}"
+        f"{objetivo_txt}"
         f"{noticia_txt}{analisis_txt}\n\n"
         f"🔗 <a href=\"{payload['url']}\">Ver mercado en Polymarket</a>\n"
         f"⏰ {payload['timestamp']}"
@@ -1313,6 +1347,306 @@ def get_ranking_ballenas() -> str:
         txt += medals[i] + " <b>" + apodo + "</b> -- " + str(aciertos) + "/" + str(total) + " (" + tasa + ")\n"
     return txt
 
+
+# ════════════════════════════════════════════════════════════════
+#  COMANDO /ballena
+# ════════════════════════════════════════════════════════════════
+
+def generar_ficha_completa(apodo: str) -> str:
+    log     = cargar_signals()
+    senales = [s for s in log if s.get("apodo") == apodo]
+    if not senales:
+        return f"No encontré ninguna ballena con el apodo <b>{apodo}</b>."
+
+    total_usd  = sum(s.get("usd", 0) for s in senales)
+    resueltas  = [s for s in senales if s.get("resultado") in ("ACIERTO", "FALLO")]
+    aciertos   = sum(1 for s in resueltas if s.get("resultado") == "ACIERTO")
+    fallos     = len(resueltas) - aciertos
+    pendientes = len(senales) - len(resueltas)
+    tasa       = str(round(aciertos / len(resueltas) * 100)) + "%" if resueltas else "Sin datos"
+
+    from collections import Counter as Cnt
+    mercados  = Cnt(s.get("mercado", "")[:35] for s in senales)
+    merc_txt  = ""
+    for m, n in mercados.most_common(3):
+        merc_txt += f"\n   • {m} ({n}x)"
+
+    ultimas = senales[-5:][::-1]
+    ult_txt = ""
+    for s in ultimas:
+        e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
+        ult_txt += f"\n{e} {s.get('mercado','?')[:35]}\n   {s.get('posicion','?')} | ${s.get('usd',0):,.0f} | Score {s.get('score','?')}"
+
+    h = get_historial_ballena(apodo)
+
+    return (
+        f"🐋 <b>FICHA COMPLETA — {apodo}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 <b>Señales totales:</b> {len(senales)}\n"
+        f"✅ <b>Acertadas:</b> {aciertos}\n"
+        f"❌ <b>Falladas:</b> {fallos}\n"
+        f"⏳ <b>Pendientes:</b> {pendientes}\n"
+        f"🎯 <b>Tasa de acierto:</b> {tasa} {h['emoji']}\n"
+        f"💰 <b>Total invertido:</b> ${total_usd:,.0f}\n\n"
+        f"📋 <b>Mercados favoritos:</b>{merc_txt}\n\n"
+        f"🕐 <b>Últimas jugadas:</b>{ult_txt}"
+    )
+
+# ════════════════════════════════════════════════════════════════
+#  ALERTA DE SALIDA DE POSICIÓN
+# ════════════════════════════════════════════════════════════════
+
+# Guardamos las posiciones conocidas de cada ballena VIP
+# {wallet: {conditionId: {"side": "BUY", "outcome": "Yes", "usd": 500}}}
+posiciones_ballenas = defaultdict(dict)
+
+def check_salida_posicion(wallet: str, apodo: str, trade: dict, payload: dict):
+    condition_id  = trade.get("conditionId", "")
+    outcome_index = int(trade.get("outcomeIndex", -1))
+    side          = trade.get("side", "").upper()
+    clave         = f"{condition_id}:{outcome_index}"
+
+    entrada = posiciones_ballenas[wallet].get(clave)
+
+    if entrada and entrada["side"] == "BUY" and side == "SELL":
+        # Ballena está saliendo de una posición que tenía
+        ganancia_txt = ""
+        try:
+            precio_actual = get_precio_actual(condition_id, outcome_index)
+            if precio_actual and entrada.get("precio_entrada"):
+                diff = precio_actual - entrada["precio_entrada"]
+                ganancia_txt = f"\n📊 Entrada: {entrada['precio_entrada']}% → Ahora: {precio_actual}% ({'+'if diff>0 else ''}{diff:.1f}%)"
+        except Exception:
+            pass
+
+        msg_lines = [
+            "🚪 <b>BALLENA SALIENDO DE POSICIÓN</b>",
+            "",
+            f"🏷️ <b>{apodo}</b> está vendiendo",
+            "",
+            f"📋 <b>Mercado:</b> {payload['market']}",
+            f"🎯 <b>Vendiendo:</b> {trade.get('outcome', '?')}",
+            f"💰 <b>USD:</b> ${payload['usd_invested']:,.2f}",
+        ]
+        if ganancia_txt:
+            msg_lines.append(ganancia_txt)
+        msg_lines += [
+            "",
+            "<i>Cuando una ballena sale, el mercado puede girar.</i>",
+            "",
+            f'<a href="{payload["url"]}">🔗 Ver mercado</a>',
+        ]
+        if TELEGRAM_CHAT_ID_VIP:
+            enviar_telegram(TELEGRAM_CHAT_ID_VIP, "\n".join(msg_lines))
+            print(f"   🚪 Salida detectada: {apodo}")
+
+    # Registrar posición actual
+    if side == "BUY":
+        posiciones_ballenas[wallet][clave] = {
+            "side":           "BUY",
+            "outcome":        trade.get("outcome", ""),
+            "precio_entrada": payload["price"],
+            "usd":            payload["usd_invested"],
+        }
+    elif side == "SELL" and clave in posiciones_ballenas[wallet]:
+        del posiciones_ballenas[wallet][clave]
+
+# ════════════════════════════════════════════════════════════════
+#  PRECIO OBJETIVO AUTOMÁTICO
+# ════════════════════════════════════════════════════════════════
+
+def calcular_precio_objetivo(precio_entrada: float, historial: dict, usd: float) -> str:
+    if historial["total"] < 3:
+        return ""
+    tasa_num = (historial["aciertos"] / historial["total"]) * 100 if historial["total"] > 0 else 0
+    # Objetivo basado en historial: si acierta mucho, el precio suele llegar a 85%+
+    if tasa_num >= 70:
+        objetivo = min(precio_entrada + 20, 90)
+    elif tasa_num >= 50:
+        objetivo = min(precio_entrada + 12, 85)
+    else:
+        objetivo = min(precio_entrada + 8, 80)
+
+    if objetivo <= precio_entrada:
+        return ""
+
+    puntos   = round(objetivo - precio_entrada, 1)
+    potencial = round(usd * (puntos / precio_entrada), 0) if precio_entrada > 0 else 0
+    return (
+        f"\n🎯 <b>Precio objetivo:</b> {objetivo:.0f}% (+{puntos} puntos)"
+        f"\n💸 <b>Potencial:</b> +${potencial:,.0f} sobre ${usd:,.0f} invertidos"
+    )
+
+# ════════════════════════════════════════════════════════════════
+#  MAPA DE CALOR DIARIO
+# ════════════════════════════════════════════════════════════════
+
+def check_mapa_calor():
+    global ultimo_resumen_nocturno
+    ahora = datetime.now(CEST)
+    # Enviar a las 20:00 CEST
+    if ahora.hour != 20 or ahora.minute > 5:
+        return
+    if datetime.now(timezone.utc) - ultimo_resumen_nocturno < timedelta(hours=20):
+        return
+    ultimo_resumen_nocturno = datetime.now(timezone.utc)
+
+    log = cargar_signals()
+    if not log:
+        return
+
+    hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    hoy_signals = [s for s in log if s.get("fecha") == hoy]
+    if not hoy_signals:
+        return
+
+    from collections import Counter as Cnt
+    mercados = Cnt(s.get("mercado", "")[:40] for s in hoy_signals)
+    top5     = mercados.most_common(5)
+    if not top5:
+        return
+
+    top_txt = ""
+    for i, (mercado, n) in enumerate(top5):
+        calor = "🔥" * min(n, 4)
+        top_txt += f"\n{i+1}. {calor} <b>{mercado}</b> — {n} ballena{'s' if n>1 else ''}"
+
+    total_usd = sum(s.get("usd", 0) for s in hoy_signals)
+
+    msg = (
+        f"🗺️ <b>MAPA DE CALOR — HOY</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💰 <b>Volumen total ballenas:</b> ${total_usd:,.0f}\n"
+        f"🐋 <b>Señales hoy:</b> {len(hoy_signals)}\n\n"
+        f"🔥 <b>Mercados más activos:</b>{top_txt}"
+    )
+    if TELEGRAM_CHAT_ID_VIP:
+        enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+        print("   🗺️ Mapa de calor enviado")
+
+# ════════════════════════════════════════════════════════════════
+#  ALERTA CONTRARIAN
+# ════════════════════════════════════════════════════════════════
+
+def check_contrarian(precio: float, side: str, outcome: str, roi: float,
+                     usd: float, apodo: str, payload: dict):
+    # Si el mercado dice >75% para YES pero la ballena apuesta NO (o viceversa)
+    es_contrarian = (
+        (precio >= 0.75 and side.upper() == "BUY" and outcome.upper() in ("NO", "FALSE"))
+        or
+        (precio <= 0.25 and side.upper() == "BUY" and outcome.upper() in ("YES", "TRUE"))
+    )
+    if not es_contrarian or roi < 30 or usd < 500:
+        return
+
+    prob_display = round(precio * 100, 1)
+    msg_lines = [
+        "🔄 <b>APUESTA CONTRARIAN DETECTADA</b>",
+        "",
+        f"<b>{apodo}</b> va en contra del mercado",
+        "",
+        f"📋 <b>Mercado:</b> {payload['market']}",
+        f"🎯 <b>Apuesta:</b> {side} → <b>{outcome}</b>",
+        f"📊 <b>Precio mercado:</b> {prob_display}% (van contra esto)",
+        f"💰 <b>Invertido:</b> ${usd:,.2f} USD",
+        f"📈 <b>ROI wallet:</b> {roi:.1f}%",
+        "",
+        "<i>Las apuestas contrarian de wallets con ROI alto son señales muy valiosas.</i>",
+        "",
+        f'<a href="{payload["url"]}">🔗 Ver mercado</a>',
+    ]
+    if TELEGRAM_CHAT_ID_VIP:
+        enviar_telegram(TELEGRAM_CHAT_ID_VIP, "\n".join(msg_lines))
+        print(f"   🔄 Contrarian: {apodo} | {outcome} al {prob_display}%")
+
+# ════════════════════════════════════════════════════════════════
+#  RACHA DE ACIERTOS
+# ════════════════════════════════════════════════════════════════
+
+def check_racha_aciertos(apodo: str):
+    log      = cargar_signals()
+    senales  = [s for s in log if s.get("apodo") == apodo and s.get("resultado") in ("ACIERTO", "FALLO")]
+    if len(senales) < 3:
+        return
+
+    # Contar racha actual (desde el final)
+    racha = 0
+    for s in reversed(senales):
+        if s["resultado"] == "ACIERTO":
+            racha += 1
+        else:
+            break
+
+    prev_racha = racha_aciertos.get(apodo, 0)
+    racha_aciertos[apodo] = racha
+
+    # Solo alertar cuando llega exactamente a 3 (no spam)
+    if racha == 3 and prev_racha == 2:
+        msg_lines = [
+            "🔥 <b>RACHA ACTIVA — 3 ACIERTOS CONSECUTIVOS</b>",
+            "",
+            f"🐋 <b>{apodo}</b> está en racha",
+            "",
+            f"✅ 3 aciertos seguidos sin un solo fallo",
+            f"📈 Su próxima señal lleva score bonus automático",
+            "",
+            "<i>Las rachas indican información privilegiada o análisis superior.</i>",
+            "",
+            f"Escribe /ballena {apodo} para ver su historial completo",
+        ]
+        if TELEGRAM_CHAT_ID_VIP:
+            enviar_telegram(TELEGRAM_CHAT_ID_VIP, "\n".join(msg_lines))
+            print(f"   🔥 Racha: {apodo} | 3 aciertos")
+
+# ════════════════════════════════════════════════════════════════
+#  RESUMEN NOCTURNO
+# ════════════════════════════════════════════════════════════════
+
+def check_resumen_nocturno():
+    ahora = datetime.now(CEST)
+    if ahora.hour != 22 or ahora.minute > 5:
+        return
+    if datetime.now(timezone.utc) - ultimo_resumen_nocturno < timedelta(hours=20):
+        return
+
+    log = cargar_signals()
+    if not log:
+        return
+
+    hoy         = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    hoy_signals = [s for s in log if s.get("fecha") == hoy]
+    if not hoy_signals:
+        return
+
+    acertadas  = sum(1 for s in hoy_signals if s["resultado"] == "ACIERTO")
+    falladas   = sum(1 for s in hoy_signals if s["resultado"] == "FALLO")
+    pendientes = sum(1 for s in hoy_signals if s["resultado"] == "PENDIENTE")
+    resueltas  = acertadas + falladas
+    tasa       = str(round(acertadas / resueltas * 100)) + "%" if resueltas > 0 else "Pendiente"
+    scores     = [s.get("score", 0) for s in hoy_signals]
+    score_med  = round(sum(scores) / len(scores)) if scores else 0
+    mejor      = max(hoy_signals, key=lambda x: x.get("score", 0))
+    total_usd  = sum(s.get("usd", 0) for s in hoy_signals)
+
+    msg = (
+        f"🌙 <b>RESUMEN NOCTURNO VIP</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🐋 <b>Señales hoy:</b> {len(hoy_signals)}\n"
+        f"✅ <b>Acertadas:</b> {acertadas}\n"
+        f"❌ <b>Falladas:</b> {falladas}\n"
+        f"⏳ <b>Pendientes:</b> {pendientes}\n"
+        f"🎯 <b>Tasa del día:</b> {tasa}\n"
+        f"⚡ <b>Score medio:</b> {score_med}/100\n"
+        f"💰 <b>Volumen ballenas:</b> ${total_usd:,.0f}\n\n"
+        f"🏆 <b>Mejor jugada del día:</b>\n"
+        f"   🐋 {mejor['apodo']} | Score {mejor.get('score', '?')}\n"
+        f"   {mejor.get('mercado', '?')[:40]}\n"
+        f"   {mejor.get('posicion', '?')} | ${mejor.get('usd', 0):,.0f}"
+    )
+    if TELEGRAM_CHAT_ID_VIP:
+        enviar_telegram(TELEGRAM_CHAT_ID_VIP, msg)
+        print("   🌙 Resumen nocturno enviado")
+
 def poll():
     global ciclo_actual
     ciclo_actual += 1
@@ -1322,8 +1656,9 @@ def poll():
     check_resumen_diario()
     check_resumen_semanal()
     check_contador_basico()
+    check_mapa_calor()
+    check_resumen_nocturno()
     resolver_pendientes()
-    revisar_divergencias()
     fijar_mensaje_vip()
     limpiar_mensajes_antiguos()
 
@@ -1405,6 +1740,8 @@ def poll():
             check_alta_conviccion(wallet, slug, apodo, payload)
             check_ballena_nueva(wallet, apodo, payload)
             check_consenso(wallet, slug, payload["outcome"], payload)
+            check_salida_posicion(wallet, apodo, trade, payload)
+            check_contrarian(precio, payload["side"], payload["outcome"], roi, usd, apodo, payload)
 
             print(f"   🐋 VIP: {apodo} | ROI {roi:.1f}% | ${usd} | Score {score} | Hist {historial['tasa']}")
             noticia       = buscar_noticia(trade.get("title", ""))
@@ -1423,7 +1760,6 @@ def poll():
                 stats_dia["señales_vip"] += 1
                 stats_dia["wallets_vip"].add(wallet)
                 stats_dia["mercados_vip"].append(payload["market"])
-                registrar_para_divergencia(condition_id, outcome_index, payload["price"], apodo, payload)
 
             if caliente and TELEGRAM_CHAT_ID_BASICO:
                 n_hits = len(mercado_hits.get(slug, []))
