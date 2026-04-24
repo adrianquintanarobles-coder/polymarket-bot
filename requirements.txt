@@ -6,3 +6,4 @@ stripe==7.4.0
 requests
 ddgs
 psycopg2-binary
+stripe
