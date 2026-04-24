@@ -1813,7 +1813,6 @@ def get_stats():
                 COUNT(CASE WHEN resultado = 'ACIERTO' THEN 1 END) as wins,
                 COUNT(CASE WHEN resultado IN ('ACIERTO', 'FALLO') THEN 1 END) as resolved
             FROM signals
-            WHERE created_at >= NOW() - INTERVAL '24 hours'
         """)
         result = cur.fetchone()
         total    = result[0] or 0
