@@ -623,29 +623,30 @@ def resolver_pendientes():
 def generar_texto_resultados() -> str:
     log = cargar_signals()
     if not log:
-        return "📊 <b>TRACK RECORD</b>\n\nAún no hay señales registradas."
+        return "Aun no hay senales registradas."
 
     total      = len(log)
     pendientes = sum(1 for s in log if s["resultado"] == "PENDIENTE")
     acertadas  = sum(1 for s in log if s["resultado"] == "ACIERTO")
     falladas   = sum(1 for s in log if s["resultado"] == "FALLO")
     resueltas  = acertadas + falladas
-    tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aún"
+    tasa       = f"{(acertadas/resueltas*100):.0f}%" if resueltas > 0 else "Sin datos aun"
 
-    def esc(t): return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    def clean(t):
+        return str(t).replace("<","").replace(">","").replace("&","and")
 
-    ultimas     = log[-3:][::-1]
+    ultimas     = log[-5:][::-1]
     ultimas_txt = ""
     for s in ultimas:
-        e = "✅" if s["resultado"] == "ACIERTO" else "❌" if s["resultado"] == "FALLO" else "⏳"
-        mercado_corto = esc(s['mercado'][:30]) + "..." if len(s['mercado']) > 30 else esc(s['mercado'])
-        ultimas_txt += f"\n{e} <b>{esc(s['apodo'])}</b> | Score {s.get('score', '?')}\n   {mercado_corto}\n"
+        e = "WIN" if s["resultado"] == "ACIERTO" else "LOSS" if s["resultado"] == "FALLO" else "..."
+        mercado = clean(s["mercado"])[:40]
+        ultimas_txt += f"\n{e} {clean(s['apodo'])} (Score {s.get('score','?')})\n    {mercado}\n"
 
     return (
-        f"📊 <b>TRACK RECORD</b>\n"
-        f"Total: {total} | ✅ {acertadas} | ❌ {falladas} | ⏳ {pendientes}\n"
-        f"Tasa: <b>{tasa}</b>\n\n"
-        f"<b>Ultimas señales:</b>{ultimas_txt}"
+        f"TRACK RECORD\n"
+        f"Total: {total}  Acertadas: {acertadas}  Falladas: {falladas}  Pendientes: {pendientes}\n"
+        f"Tasa de acierto: {tasa}\n"
+        f"\nUltimas senales:{ultimas_txt}"
     )
 
 # ════════════════════════════════════════════════════════════════
@@ -841,7 +842,12 @@ def procesar_comandos():
 
             if "/resultados" in texto_l:
                 print(f"   📩 /resultados desde {chat_id}")
-                enviar_telegram(chat_id, generar_texto_resultados())
+                texto_res = generar_texto_resultados()
+                try:
+                    url_tg = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                    requests.post(url_tg, json={"chat_id": chat_id, "text": texto_res, "parse_mode": "MarkdownV2"}, timeout=10)
+                except Exception:
+                    enviar_telegram(chat_id, texto_res)
 
             elif texto_l.startswith("/ballena"):
                 partes = texto[8:].strip()
