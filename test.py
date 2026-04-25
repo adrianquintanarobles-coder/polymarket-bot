@@ -42,8 +42,8 @@ DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXse
 MIN_USD_BASICO   = 50
 MAX_USD_BASICO   = 499
 MIN_ROI_BASICO   = 0
-MIN_USD_VIP      = 100    # TEST — cambiar a 500 en producción
-MIN_ROI_VIP      = 5      # TEST — cambiar a 10 en producción
+MIN_USD_VIP      = 500    # TEST — cambiar a 500 en producción
+MIN_ROI_VIP      = 10      # TEST — cambiar a 10 en producción
 PRECIO_MIN       = 0.15
 PRECIO_MAX       = 0.85
 
