@@ -42,8 +42,8 @@ DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXse
 MIN_USD_BASICO   = 50
 MAX_USD_BASICO   = 499
 MIN_ROI_BASICO   = 0
-MIN_USD_VIP      = 500    # TEST — cambiar a 500 en producción
-MIN_ROI_VIP      = 10      # TEST — cambiar a 10 en producción
+MIN_USD_VIP      = 100    # TEST — cambiar a 500 en producción
+MIN_ROI_VIP      = 5      # TEST — cambiar a 10 en producción
 PRECIO_MIN       = 0.15
 PRECIO_MAX       = 0.85
 
@@ -870,6 +870,16 @@ def procesar_comandos():
             elif texto_l.startswith("/lista"):
                 print(f"   📩 /lista desde {chat_id}")
                 enviar_telegram(chat_id, generar_lista_ballenas())
+
+            elif texto_l.startswith("/cancelar"):
+                enviar_telegram(chat_id,
+                    f"❌ <b>Cancelar suscripción VIP</b>\n\n"
+                    f"Para cancelar tu suscripción ve a:\n\n"
+                    f"<a href=\"https://billing.stripe.com/p/login/\">🔗 Portal de Stripe</a>\n\n"
+                    f"O cancela directamente desde Whop:\n"
+                    f"<a href=\"https://whop.com/PolyWhales\">🔗 Gestionar en Whop</a>\n\n"
+                    f"<i>Tu acceso VIP se mantendrá hasta el final del periodo pagado.</i>"
+                )
 
             # ── Comandos admin ───────────────────────────────────
             elif texto_l.startswith("/addvip") and es_admin:
