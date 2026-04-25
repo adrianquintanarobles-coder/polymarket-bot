@@ -35,15 +35,15 @@ WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
 WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
 STRIPE_SECRET_KEY       = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET   = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TPlswLbIeIY3uS5asHz9g5V")
+STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TNpFHLQKsHvzszRsKQ5Pk78")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO   = 50
 MAX_USD_BASICO   = 499
 MIN_ROI_BASICO   = 0
-MIN_USD_VIP      = 500   # TEST — cambiar a 500 en producción
-MIN_ROI_VIP      = 10     # TEST — cambiar a 10 en producción
+MIN_USD_VIP      = 100    # TEST — cambiar a 500 en producción
+MIN_ROI_VIP      = 5      # TEST — cambiar a 10 en producción
 PRECIO_MIN       = 0.15
 PRECIO_MAX       = 0.85
 
@@ -83,6 +83,7 @@ wallets_conocidas         = set()
 consenso_tracker          = defaultdict(list)
 racha_aciertos            = defaultdict(int)  # {apodo: racha_actual}
 ultimo_resumen_nocturno   = datetime.now(timezone.utc) - timedelta(hours=25)
+ultimo_mapa_calor         = datetime.now(timezone.utc) - timedelta(hours=25)
 
 stats_dia = {
     "señales_vip":    0,
@@ -1725,14 +1726,14 @@ def calcular_precio_objetivo(precio_entrada: float, historial: dict, usd: float)
 # ════════════════════════════════════════════════════════════════
 
 def check_mapa_calor():
-    global ultimo_resumen_nocturno
+    global ultimo_mapa_calor
     ahora = datetime.now(CEST)
     # Enviar a las 20:00 CEST
     if ahora.hour != 20 or ahora.minute > 5:
         return
-    if datetime.now(timezone.utc) - ultimo_resumen_nocturno < timedelta(hours=20):
+    if datetime.now(timezone.utc) - ultimo_mapa_calor < timedelta(hours=20):
         return
-    ultimo_resumen_nocturno = datetime.now(timezone.utc)
+    ultimo_mapa_calor = datetime.now(timezone.utc)
 
     log = cargar_signals()
     if not log:
