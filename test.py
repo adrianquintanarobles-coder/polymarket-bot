@@ -516,21 +516,23 @@ def resolver_pendientes():
             precio_final = float(prices[outcome_index])
             cerrado      = mercado.get("closed", False) or mercado.get("resolved", False)
 
+            print(f"   🔎 {señal.get('apodo','?')[:15]} | precio={precio_final:.3f} | cerrado={cerrado} | outcome_idx={outcome_index}")
+
             # Método 1: mercado oficialmente cerrado
-            # Método 2: precio extremo aunque no esté cerrado (≥95% o ≤5%)
+            # Método 2: precio extremo aunque no esté cerrado (≥80% o ≤20%)
             if cerrado:
-                if precio_final >= 0.9:
+                if precio_final >= 0.8:
                     resultado = "ACIERTO"
                     emoji     = "✅"
-                elif precio_final <= 0.1:
+                elif precio_final <= 0.2:
                     resultado = "FALLO"
                     emoji     = "❌"
                 else:
                     continue
-            elif precio_final >= 0.95:
+            elif precio_final >= 0.90:
                 resultado = "ACIERTO"
                 emoji     = "✅"
-            elif precio_final <= 0.05:
+            elif precio_final <= 0.10:
                 resultado = "FALLO"
                 emoji     = "❌"
             else:
