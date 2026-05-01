@@ -35,15 +35,15 @@ WHOP_API_KEY            = os.getenv("WHOP_API_KEY", "")
 WHOP_WEBHOOK_SECRET     = os.getenv("WHOP_WEBHOOK_SECRET", "")
 STRIPE_SECRET_KEY       = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET   = os.getenv("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TNpFHLQKsHvzszRsKQ5Pk78")
+STRIPE_PRICE_ID         = os.getenv("STRIPE_PRICE_ID", "price_1TPlswLbIeIY3uS5asHz9g5V")
 DATABASE_URL            = os.getenv("DATABASE_URL", "postgresql://postgres:xLXseImrMQCWrpOHSVxCJdNIlZKfGSSo@postgres.railway.internal:5432/railway")
 
 # ── UMBRALES ─────────────────────────────────────────────────────
 MIN_USD_BASICO   = 50
 MAX_USD_BASICO   = 499
 MIN_ROI_BASICO   = 0
-MIN_USD_VIP      = 500    # TEST — cambiar a 500 en producción
-MIN_ROI_VIP      = 10      # TEST — cambiar a 10 en producción
+MIN_USD_VIP      = 500
+MIN_ROI_VIP      = 10
 PRECIO_MIN       = 0.15
 PRECIO_MAX       = 0.85
 
@@ -1847,11 +1847,13 @@ def check_racha_aciertos(apodo: str):
 # ════════════════════════════════════════════════════════════════
 
 def check_resumen_nocturno():
+    global ultimo_resumen_nocturno
     ahora = datetime.now(CEST)
     if ahora.hour != 22 or ahora.minute > 5:
         return
     if datetime.now(timezone.utc) - ultimo_resumen_nocturno < timedelta(hours=20):
         return
+    ultimo_resumen_nocturno = datetime.now(timezone.utc)
 
     log = cargar_signals()
     if not log:
