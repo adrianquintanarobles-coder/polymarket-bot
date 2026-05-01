@@ -876,9 +876,7 @@ def procesar_comandos():
                 enviar_telegram(chat_id,
                     f"❌ <b>Cancelar suscripción VIP</b>\n\n"
                     f"Para cancelar tu suscripción ve a:\n\n"
-                    f"<a href=\"https://billing.stripe.com/p/login/\">🔗 Portal de Stripe</a>\n\n"
-                    f"O cancela directamente desde Whop:\n"
-                    f"<a href=\"https://whop.com/PolyWhales\">🔗 Gestionar en Whop</a>\n\n"
+                    f"<a href=\"https://billing.stripe.com/p/login/14A4gAdkE3t3dox4hn3Nm00\">🔗 Portal de Stripe</a>\n\n"
                     f"<i>Tu acceso VIP se mantendrá hasta el final del periodo pagado.</i>"
                 )
 
