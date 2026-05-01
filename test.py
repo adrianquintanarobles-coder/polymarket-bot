@@ -2093,6 +2093,11 @@ def get_stats():
 def health():
     return jsonify({"status": "ok"})
 
+@app.route("/og.png")
+def og_image():
+    from flask import send_file
+    return send_file("og.png", mimetype="image/png")
+
 @app.route("/api/signals", methods=["GET"])
 def get_signals():
     try:
